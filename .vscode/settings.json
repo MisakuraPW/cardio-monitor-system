@@ -1,0 +1,15 @@
+{
+  "dart.flutterSdkPath": "FlutterSDK/flutter",
+  "dart.analysisExcludedFolders": [
+    "FlutterSDK"
+  ],
+  "files.exclude": {
+    "FlutterSDK": true
+  },
+  "files.watcherExclude": {
+    "**/FlutterSDK/**": true
+  },
+  "search.exclude": {
+    "FlutterSDK": true
+  }
+}
