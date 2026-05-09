@@ -17,6 +17,13 @@ class MonitorController extends ChangeNotifier {
     _fileAdapter = FileReplayAdapter();
     _bluetoothAdapter = BluetoothDataSourceAdapter(bluetoothConfig);
     _bindAdapter(_mqttAdapter);
+    _uiTickTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (!_hasPendingFrameNotify) {
+        return;
+      }
+      _hasPendingFrameNotify = false;
+      notifyListeners();
+    });
   }
 
   final Uuid _uuid = const Uuid();
@@ -34,12 +41,17 @@ class MonitorController extends ChangeNotifier {
   StreamSubscription<SignalFrame>? _frameSubscription;
   StreamSubscription<AdapterStatus>? _statusSubscription;
   StreamSubscription<List<ChannelDescriptor>>? _catalogSubscription;
+  StreamSubscription<TransportStats>? _statsSubscription;
   Timer? _notifyTimer;
+  Timer? _uiTickTimer;
+  bool _hasPendingFrameNotify = false;
 
   final List<String> _events = <String>[];
   final Map<String, WaveformBuffer> _buffers = <String, WaveformBuffer>{};
   final Map<String, ChannelRuntimeStats> _runtimeStats =
       <String, ChannelRuntimeStats>{};
+  final Map<String, TransportStats> _transportStats =
+      <String, TransportStats>{};
   Map<String, WaveformBufferSnapshot> _pausedSnapshots =
       <String, WaveformBufferSnapshot>{};
   List<ChannelDescriptor> _channelCatalog = <ChannelDescriptor>[];
@@ -337,6 +349,10 @@ class MonitorController extends ChangeNotifier {
     return _runtimeStats[channelKey] ?? ChannelRuntimeStats.empty(channelKey);
   }
 
+  List<TransportStats> get transportStats =>
+      _transportStats.values.toList(growable: false)
+        ..sort((TransportStats a, TransportStats b) => a.source.compareTo(b.source));
+
   Future<void> uploadAndAnalyze() async {
     final localSession = session;
     if (localSession == null || _buffers.isEmpty) {
@@ -390,10 +406,12 @@ class MonitorController extends ChangeNotifier {
     _frameSubscription?.cancel();
     _statusSubscription?.cancel();
     _catalogSubscription?.cancel();
+    _statsSubscription?.cancel();
     _currentAdapter = adapter;
     _frameSubscription = adapter.streamFrames.listen(_onFrame);
     _statusSubscription = adapter.streamStatus.listen(_onStatus);
     _catalogSubscription = adapter.streamCatalog.listen(_onCatalog);
+    _statsSubscription = adapter.streamTransportStats.listen(_onTransportStats);
   }
 
   void _onCatalog(List<ChannelDescriptor> channels) {
@@ -429,6 +447,11 @@ class MonitorController extends ChangeNotifier {
           latestSampleTimestampMs: frameLatestTimestampMs,
           receivedAtMs: DateTime.now().millisecondsSinceEpoch,
         );
+    _markFrameDirty();
+  }
+
+  void _onTransportStats(TransportStats stats) {
+    _transportStats[stats.source] = stats;
     _scheduleNotify();
   }
 
@@ -704,6 +727,10 @@ class MonitorController extends ChangeNotifier {
     _notifyTimer = Timer(const Duration(milliseconds: 24), notifyListeners);
   }
 
+  void _markFrameDirty() {
+    _hasPendingFrameNotify = true;
+  }
+
   int _liveAnchorTimestampMs() {
     final liveBase = latestTimestampMs == 0
         ? DateTime.now().millisecondsSinceEpoch
@@ -714,9 +741,11 @@ class MonitorController extends ChangeNotifier {
   @override
   void dispose() {
     _notifyTimer?.cancel();
+    _uiTickTimer?.cancel();
     _frameSubscription?.cancel();
     _statusSubscription?.cancel();
     _catalogSubscription?.cancel();
+    _statsSubscription?.cancel();
     _mqttAdapter.dispose();
     _fileAdapter.dispose();
     _bluetoothAdapter.dispose();
@@ -736,9 +765,13 @@ class ChannelRuntimeStats {
   int outOfOrderFrames = 0;
   int sampleGapEvents = 0;
   int largestSampleGapMs = 0;
+  int crcErrorFrames = 0;
+  int decodeErrorFrames = 0;
   int lastReceivedAtMs = 0;
   int latestSampleTimestampMs = 0;
   int lastSampleCount = 0;
+  int latestFrameVersion = 1;
+  String lastTransport = 'unknown';
 
   bool get hasData => receivedFrames > 0;
 
@@ -751,6 +784,13 @@ class ChannelRuntimeStats {
     receivedSamples += frame.samples.length;
     lastSampleCount = frame.samples.length;
     lastReceivedAtMs = receivedAtMs;
+    latestFrameVersion = frame.frameVersion;
+    lastTransport = frame.transport;
+    if (frame.decodeStatus == 'crc_error') {
+      crcErrorFrames += 1;
+    } else if (frame.decodeStatus != 'ok') {
+      decodeErrorFrames += 1;
+    }
     _observeSeq(frame.seq);
     _observeTimestampGaps(frame);
     this.latestSampleTimestampMs = math.max(
@@ -840,6 +880,75 @@ abstract class WaveformHistoryStore {
   List<double> tailValues({required int maxItems});
 }
 
+WaveformSlice _buildWaveformSlice(
+  List<SamplePoint> points,
+  int firstVisibleIndex,
+  int endExclusive,
+) {
+  const maxVisiblePoints = 2400;
+  var minValue = points[firstVisibleIndex].value;
+  var maxValue = minValue;
+  final length = endExclusive - firstVisibleIndex;
+  for (var index = firstVisibleIndex + 1; index < endExclusive; index++) {
+    final value = points[index].value;
+    minValue = math.min(minValue, value);
+    maxValue = math.max(maxValue, value);
+  }
+
+  if (length <= maxVisiblePoints) {
+    return WaveformSlice(
+      points: List<SamplePoint>.generate(
+        length,
+        (int offset) => points[firstVisibleIndex + offset],
+        growable: false,
+      ),
+      minValue: minValue,
+      maxValue: maxValue,
+    );
+  }
+
+  final chunkSize = math.max(1, (length / maxVisiblePoints).ceil());
+  final visible = <SamplePoint>[];
+  void appendUnique(SamplePoint point) {
+    if (visible.isNotEmpty &&
+        visible.last.timestampMs == point.timestampMs &&
+        visible.last.value == point.value) {
+      return;
+    }
+    visible.add(point);
+  }
+
+  for (var start = firstVisibleIndex; start < endExclusive; start += chunkSize) {
+    final end = math.min(endExclusive, start + chunkSize);
+    var minPoint = points[start];
+    var maxPoint = points[start];
+    for (var index = start + 1; index < end; index++) {
+      final point = points[index];
+      if (point.value < minPoint.value) {
+        minPoint = point;
+      }
+      if (point.value > maxPoint.value) {
+        maxPoint = point;
+      }
+    }
+    appendUnique(points[start]);
+    if (minPoint.timestampMs <= maxPoint.timestampMs) {
+      appendUnique(minPoint);
+      appendUnique(maxPoint);
+    } else {
+      appendUnique(maxPoint);
+      appendUnique(minPoint);
+    }
+    appendUnique(points[end - 1]);
+  }
+
+  return WaveformSlice(
+    points: visible,
+    minValue: minValue,
+    maxValue: maxValue,
+  );
+}
+
 class WaveformBufferSnapshot implements WaveformHistoryStore {
   WaveformBufferSnapshot({
     required this.channelKey,
@@ -876,26 +985,7 @@ class WaveformBufferSnapshot implements WaveformHistoryStore {
       return WaveformSlice.empty;
     }
 
-    var minValue = _points[firstVisibleIndex].value;
-    var maxValue = minValue;
-    final visible = List<SamplePoint>.generate(
-      endExclusive - firstVisibleIndex,
-      (int offset) {
-        final point = _points[firstVisibleIndex + offset];
-        if (offset > 0) {
-          minValue = math.min(minValue, point.value);
-          maxValue = math.max(maxValue, point.value);
-        }
-        return point;
-      },
-      growable: false,
-    );
-
-    return WaveformSlice(
-      points: visible,
-      minValue: minValue,
-      maxValue: maxValue,
-    );
+    return _buildWaveformSlice(_points, firstVisibleIndex, endExclusive);
   }
 
   @override
@@ -1009,26 +1099,7 @@ class WaveformBuffer implements WaveformHistoryStore {
       return WaveformSlice.empty;
     }
 
-    var minValue = _points[firstVisibleIndex].value;
-    var maxValue = minValue;
-    final visible = List<SamplePoint>.generate(
-      endExclusive - firstVisibleIndex,
-      (int offset) {
-        final point = _points[firstVisibleIndex + offset];
-        if (offset > 0) {
-          minValue = math.min(minValue, point.value);
-          maxValue = math.max(maxValue, point.value);
-        }
-        return point;
-      },
-      growable: false,
-    );
-
-    return WaveformSlice(
-      points: visible,
-      minValue: minValue,
-      maxValue: maxValue,
-    );
+    return _buildWaveformSlice(_points, firstVisibleIndex, endExclusive);
   }
 
   @override

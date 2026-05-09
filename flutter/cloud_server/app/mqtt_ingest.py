@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import struct
+import time
+import zlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +41,8 @@ class _BinaryFrame:
     end_timestamp_ms: int
     samples: list[float]
     seq: int
+    frame_version: int = 1
+    decode_status: str = 'ok'
 
 
 @dataclass
@@ -66,7 +70,7 @@ class MqttIngestService:
 
         device_id = segments[1]
         channel_or_topic = '/'.join(segments[2:])
-        if self._is_binary_topic(channel_or_topic) and _looks_like_bio1(payload_bytes):
+        if self._is_binary_topic(channel_or_topic) and _looks_like_bio(payload_bytes):
             self._handle_binary_payload(device_id, payload_bytes)
             return
 
@@ -139,9 +143,10 @@ class MqttIngestService:
             )
 
     def _handle_binary_payload(self, device_id: str, payload_bytes: bytes) -> None:
-        batch = _decode_bio1(payload_bytes)
+        received_at_ms = int(time.time() * 1000)
+        batch = _decode_bio(payload_bytes)
         if batch.is_empty:
-            print(f'[mqtt-ingest] invalid BIO1 payload from {device_id}', flush=True)
+            print(f'[mqtt-ingest] invalid BIO payload from {device_id}', flush=True)
             return
 
         session_id = self._ensure_binary_session(
@@ -153,7 +158,7 @@ class MqttIngestService:
                 deviceId=device_id,
                 sourceMode='wifi_mqtt_binary',
                 lastStatus='online',
-                metadata={'transport': 'mqtt', 'payload': 'BIO1'},
+                metadata={'transport': 'mqtt', 'payload': 'BIO'},
             )
         )
         self._save_binary_catalog_if_needed(device_id, session_id, batch.channels)
@@ -171,11 +176,18 @@ class MqttIngestService:
                     endTimestampMs=frame.end_timestamp_ms,
                     samples=frame.samples,
                     transport='mqtt_binary',
-                    metadata={'seq': frame.seq, 'payload': 'BIO1'},
+                    metadata={
+                        'seq': frame.seq,
+                        'payload': f'BIO{frame.frame_version}',
+                        'frameVersion': frame.frame_version,
+                        'decodeStatus': frame.decode_status,
+                        'ingestReceivedAtMs': received_at_ms,
+                        'ingestLatencyMs': max(0, received_at_ms - frame.end_timestamp_ms),
+                    },
                 )
             )
         print(
-            f'[mqtt-ingest] BIO1 {device_id}: {len(batch.frames)} frames, session={session_id}',
+            f'[mqtt-ingest] BIO {device_id}: {len(batch.frames)} frames, session={session_id}',
             flush=True,
         )
 
@@ -230,39 +242,63 @@ class MqttIngestService:
     def _is_binary_topic(self, channel_or_topic: str) -> bool:
         return (
             channel_or_topic.startswith('waveform/')
+            or channel_or_topic.startswith('waveform_bin/')
             or channel_or_topic in {'telemetry_bin', 'binary'}
         )
 
 
-def _decode_bio1(payload: bytes) -> _BinaryBatch:
+def _decode_bio(payload: bytes) -> _BinaryBatch:
     channels: dict[str, _BinaryChannel] = {}
     frames: list[_BinaryFrame] = []
     cursor = 0
 
     while cursor <= len(payload) - 11:
-        magic_index = payload.find(b'BIO1', cursor)
+        bio1_index = payload.find(b'BIO1', cursor)
+        bio2_index = payload.find(b'BIO2', cursor)
+        candidates = [item for item in (bio1_index, bio2_index) if item >= 0]
+        magic_index = min(candidates) if candidates else -1
         if magic_index < 0 or magic_index + 11 > len(payload):
             break
 
-        type_code = chr(payload[magic_index + 4])
+        is_bio2 = bio2_index == magic_index
+        header_len = 19 if is_bio2 else 11
+        if magic_index + header_len > len(payload):
+            break
+
+        type_code = chr(payload[magic_index + (5 if is_bio2 else 4)])
         sample_size = _sample_size_for_type(type_code)
         if sample_size is None:
             cursor = magic_index + 1
             continue
 
-        seq = struct.unpack_from('<I', payload, magic_index + 5)[0]
-        sample_count = struct.unpack_from('<H', payload, magic_index + 9)[0]
-        frame_length = 11 + sample_count * sample_size
+        seq = struct.unpack_from('<I', payload, magic_index + (7 if is_bio2 else 5))[0]
+        sample_count = struct.unpack_from('<H', payload, magic_index + (11 if is_bio2 else 9))[0]
+        payload_len = (
+            struct.unpack_from('<H', payload, magic_index + 13)[0]
+            if is_bio2
+            else sample_count * sample_size
+        )
+        frame_length = header_len + payload_len
         if sample_count == 0 or magic_index + frame_length > len(payload):
             break
+        if payload_len != sample_count * sample_size:
+            cursor = magic_index + 1
+            continue
+
+        decode_status = 'ok'
+        if is_bio2:
+            expected_crc = struct.unpack_from('<I', payload, magic_index + 15)[0]
+            actual_crc = zlib.crc32(payload[magic_index + header_len : magic_index + frame_length]) & 0xFFFFFFFF
+            if actual_crc != expected_crc:
+                decode_status = 'crc_error'
 
         frame = memoryview(payload)[magic_index : magic_index + frame_length]
         if type_code == 'E':
-            _decode_ecg(frame, seq, sample_count, sample_size, channels, frames)
+            _decode_ecg(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
         elif type_code == 'P':
-            _decode_ppg(frame, seq, sample_count, sample_size, channels, frames)
+            _decode_ppg(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
         elif type_code == 'I':
-            _decode_imu(frame, seq, sample_count, sample_size, channels, frames)
+            _decode_imu(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
 
         cursor = magic_index + frame_length
 
@@ -276,17 +312,20 @@ def _decode_ecg(
     sample_size: int,
     channels: dict[str, _BinaryChannel],
     frames: list[_BinaryFrame],
+    payload_offset: int,
+    frame_version: int,
+    decode_status: str,
 ) -> None:
     timestamps_us: list[int] = []
     samples: list[float] = []
     for index in range(sample_count):
-        offset = 11 + index * sample_size
+        offset = payload_offset + index * sample_size
         timestamps_us.append(struct.unpack_from('<Q', frame, offset)[0])
         samples.append(float(struct.unpack_from('<H', frame, offset + 8)[0]))
 
     sample_rate = _estimate_sample_rate(timestamps_us, 500)
     channels['ecg'] = _channel('ecg', 'ECG', 'adc', sample_rate, '#F25F5C')
-    frames.append(_frame('ecg', 'adc', sample_rate, timestamps_us, samples, seq))
+    frames.append(_frame('ecg', 'adc', sample_rate, timestamps_us, samples, seq, frame_version, decode_status))
 
 
 def _decode_ppg(
@@ -296,12 +335,15 @@ def _decode_ppg(
     sample_size: int,
     channels: dict[str, _BinaryChannel],
     frames: list[_BinaryFrame],
+    payload_offset: int,
+    frame_version: int,
+    decode_status: str,
 ) -> None:
     timestamps_us: list[int] = []
     ir_samples: list[float] = []
     red_samples: list[float] = []
     for index in range(sample_count):
-        offset = 11 + index * sample_size
+        offset = payload_offset + index * sample_size
         timestamps_us.append(struct.unpack_from('<Q', frame, offset)[0])
         ir_samples.append(float(struct.unpack_from('<I', frame, offset + 8)[0]))
         red_samples.append(float(struct.unpack_from('<I', frame, offset + 12)[0]))
@@ -309,8 +351,8 @@ def _decode_ppg(
     sample_rate = _estimate_sample_rate(timestamps_us, 100)
     channels['ppg_ir'] = _channel('ppg_ir', 'PPG IR', 'count', sample_rate, '#247BA0')
     channels['ppg_red'] = _channel('ppg_red', 'PPG RED', 'count', sample_rate, '#C84C5A')
-    frames.append(_frame('ppg_ir', 'count', sample_rate, timestamps_us, ir_samples, seq))
-    frames.append(_frame('ppg_red', 'count', sample_rate, timestamps_us, red_samples, seq))
+    frames.append(_frame('ppg_ir', 'count', sample_rate, timestamps_us, ir_samples, seq, frame_version, decode_status))
+    frames.append(_frame('ppg_red', 'count', sample_rate, timestamps_us, red_samples, seq, frame_version, decode_status))
 
 
 def _decode_imu(
@@ -320,6 +362,9 @@ def _decode_imu(
     sample_size: int,
     channels: dict[str, _BinaryChannel],
     frames: list[_BinaryFrame],
+    payload_offset: int,
+    frame_version: int,
+    decode_status: str,
 ) -> None:
     timestamps_us: list[int] = []
     samples = {
@@ -331,7 +376,7 @@ def _decode_imu(
         'imu_gz': [],
     }
     for index in range(sample_count):
-        offset = 11 + index * sample_size
+        offset = payload_offset + index * sample_size
         timestamps_us.append(struct.unpack_from('<Q', frame, offset)[0])
         samples['imu_ax'].append(float(struct.unpack_from('<h', frame, offset + 8)[0]))
         samples['imu_ay'].append(float(struct.unpack_from('<h', frame, offset + 10)[0]))
@@ -352,7 +397,7 @@ def _decode_imu(
     for key, values in samples.items():
         label, color = metadata[key]
         channels[key] = _channel(key, label, 'raw', sample_rate, color)
-        frames.append(_frame(key, 'raw', sample_rate, timestamps_us, values, seq))
+        frames.append(_frame(key, 'raw', sample_rate, timestamps_us, values, seq, frame_version, decode_status))
 
 
 def _frame(
@@ -362,6 +407,8 @@ def _frame(
     timestamps_us: list[int],
     samples: list[float],
     seq: int,
+    frame_version: int,
+    decode_status: str,
 ) -> _BinaryFrame:
     return _BinaryFrame(
         channel_key=channel_key,
@@ -371,6 +418,8 @@ def _frame(
         end_timestamp_ms=timestamps_us[-1] // 1000,
         samples=samples,
         seq=seq,
+        frame_version=frame_version,
+        decode_status=decode_status,
     )
 
 
@@ -390,8 +439,8 @@ def _channel(
     )
 
 
-def _looks_like_bio1(payload: bytes) -> bool:
-    return payload.find(b'BIO1') >= 0
+def _looks_like_bio(payload: bytes) -> bool:
+    return payload.find(b'BIO1') >= 0 or payload.find(b'BIO2') >= 0
 
 
 def _sample_size_for_type(type_code: str) -> int | None:
@@ -438,6 +487,7 @@ def run_forever(
         client_obj.subscribe(f'{topic_prefix}/+/status')
         client_obj.subscribe(f'{topic_prefix}/+/catalog')
         client_obj.subscribe(f'{topic_prefix}/+/waveform/#')
+        client_obj.subscribe(f'{topic_prefix}/+/waveform_bin/#')
         client_obj.subscribe(f'{topic_prefix}/+/telemetry_bin')
         client_obj.subscribe(f'{topic_prefix}/+/binary')
         client_obj.subscribe(f'{topic_prefix}/+/alerts')

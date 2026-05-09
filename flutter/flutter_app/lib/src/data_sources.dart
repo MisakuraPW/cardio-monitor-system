@@ -16,6 +16,7 @@ abstract class DataSourceAdapter {
   Stream<SignalFrame> get streamFrames;
   Stream<AdapterStatus> get streamStatus;
   Stream<List<ChannelDescriptor>> get streamCatalog;
+  Stream<TransportStats> get streamTransportStats;
 
   Future<void> connect();
   Future<void> disconnect();
@@ -71,34 +72,67 @@ class _Bio1DecodedBatch {
 }
 
 class _Bio1BinaryCodec {
+  static const int _bio1HeaderLength = 11;
+  static const int _bio2HeaderLength = 19;
+
   static _Bio1DecodedBatch decode(
     Uint8List bytes, {
     required String deviceId,
     required String sessionId,
+    String transport = 'binary',
   }) {
     final frames = <SignalFrame>[];
     final channels = <String, ChannelDescriptor>{};
     var cursor = 0;
 
-    while (cursor <= bytes.length - 11) {
-      final magicIndex = _indexOfMagic(bytes, cursor);
-      if (magicIndex < 0 || magicIndex + 11 > bytes.length) {
+    while (cursor <= bytes.length - _bio1HeaderLength) {
+      final bio1Index = _indexOfMagic(bytes, cursor, 0x31);
+      final bio2Index = _indexOfMagic(bytes, cursor, 0x32);
+      final magicIndex = _firstNonNegative(bio1Index, bio2Index);
+      if (magicIndex < 0 || magicIndex + _bio1HeaderLength > bytes.length) {
         break;
       }
 
-      final typeByte = bytes[magicIndex + 4];
+      final isBio2 = bio2Index >= 0 && bio2Index == magicIndex;
+      final headerLength = isBio2 ? _bio2HeaderLength : _bio1HeaderLength;
+      if (magicIndex + headerLength > bytes.length) {
+        break;
+      }
+
+      final typeByte = bytes[magicIndex + (isBio2 ? 5 : 4)];
       final sampleSize = _sampleSizeForType(typeByte);
       if (sampleSize == null) {
         cursor = magicIndex + 1;
         continue;
       }
 
-      final header = ByteData.sublistView(bytes, magicIndex, magicIndex + 11);
-      final seq = header.getUint32(5, Endian.little);
-      final sampleCount = header.getUint16(9, Endian.little);
-      final frameLength = 11 + sampleCount * sampleSize;
+      final header = ByteData.sublistView(bytes, magicIndex, magicIndex + headerLength);
+      final seq = isBio2
+          ? header.getUint32(7, Endian.little)
+          : header.getUint32(5, Endian.little);
+      final sampleCount = isBio2
+          ? header.getUint16(11, Endian.little)
+          : header.getUint16(9, Endian.little);
+      final payloadLength = isBio2
+          ? header.getUint16(13, Endian.little)
+          : sampleCount * sampleSize;
+      final frameLength = headerLength + payloadLength;
       if (sampleCount == 0 || magicIndex + frameLength > bytes.length) {
         break;
+      }
+      if (payloadLength != sampleCount * sampleSize) {
+        cursor = magicIndex + 1;
+        continue;
+      }
+
+      final frameVersion = isBio2 ? bytes[magicIndex + 4] : 1;
+      var decodeStatus = 'ok';
+      if (isBio2) {
+        final expectedCrc = header.getUint32(15, Endian.little);
+        final actualCrc = _crc32(bytes, magicIndex + headerLength, payloadLength);
+        if (actualCrc != expectedCrc) {
+          decodeStatus = 'crc_error';
+        }
       }
 
       final data = ByteData.sublistView(
@@ -117,6 +151,10 @@ class _Bio1BinaryCodec {
             sessionId: sessionId,
             frames: frames,
             channels: channels,
+            payloadOffset: headerLength,
+            frameVersion: frameVersion,
+            decodeStatus: decodeStatus,
+            transport: transport,
           );
           break;
         case 'P':
@@ -129,6 +167,10 @@ class _Bio1BinaryCodec {
             sessionId: sessionId,
             frames: frames,
             channels: channels,
+            payloadOffset: headerLength,
+            frameVersion: frameVersion,
+            decodeStatus: decodeStatus,
+            transport: transport,
           );
           break;
         case 'I':
@@ -141,6 +183,10 @@ class _Bio1BinaryCodec {
             sessionId: sessionId,
             frames: frames,
             channels: channels,
+            payloadOffset: headerLength,
+            frameVersion: frameVersion,
+            decodeStatus: decodeStatus,
+            transport: transport,
           );
           break;
       }
@@ -154,7 +200,8 @@ class _Bio1BinaryCodec {
     );
   }
 
-  static bool looksLikeBio1(Uint8List bytes) => _indexOfMagic(bytes, 0) >= 0;
+  static bool looksLikeBio1(Uint8List bytes) =>
+      _indexOfMagic(bytes, 0, 0x31) >= 0 || _indexOfMagic(bytes, 0, 0x32) >= 0;
 
   static void _decodeEcg(
     ByteData data, {
@@ -165,11 +212,15 @@ class _Bio1BinaryCodec {
     required String sessionId,
     required List<SignalFrame> frames,
     required Map<String, ChannelDescriptor> channels,
+    required int payloadOffset,
+    required int frameVersion,
+    required String decodeStatus,
+    required String transport,
   }) {
     final timestampsUs = <int>[];
     final values = <double>[];
     for (var index = 0; index < sampleCount; index++) {
-      final offset = 11 + index * sampleSize;
+      final offset = payloadOffset + index * sampleSize;
       timestampsUs.add(_readUint64Le(data, offset));
       values.add(data.getUint16(offset + 8, Endian.little).toDouble());
     }
@@ -191,6 +242,9 @@ class _Bio1BinaryCodec {
         sampleRate: sampleRate,
         timestampsUs: timestampsUs,
         samples: values,
+        transport: transport,
+        frameVersion: frameVersion,
+        decodeStatus: decodeStatus,
       ),
     );
   }
@@ -204,12 +258,16 @@ class _Bio1BinaryCodec {
     required String sessionId,
     required List<SignalFrame> frames,
     required Map<String, ChannelDescriptor> channels,
+    required int payloadOffset,
+    required int frameVersion,
+    required String decodeStatus,
+    required String transport,
   }) {
     final timestampsUs = <int>[];
     final irValues = <double>[];
     final redValues = <double>[];
     for (var index = 0; index < sampleCount; index++) {
-      final offset = 11 + index * sampleSize;
+      final offset = payloadOffset + index * sampleSize;
       timestampsUs.add(_readUint64Le(data, offset));
       irValues.add(data.getUint32(offset + 8, Endian.little).toDouble());
       redValues.add(data.getUint32(offset + 12, Endian.little).toDouble());
@@ -240,6 +298,9 @@ class _Bio1BinaryCodec {
           sampleRate: sampleRate,
           timestampsUs: timestampsUs,
           samples: irValues,
+          transport: transport,
+          frameVersion: frameVersion,
+          decodeStatus: decodeStatus,
         ),
       )
       ..add(
@@ -252,6 +313,9 @@ class _Bio1BinaryCodec {
           sampleRate: sampleRate,
           timestampsUs: timestampsUs,
           samples: redValues,
+          transport: transport,
+          frameVersion: frameVersion,
+          decodeStatus: decodeStatus,
         ),
       );
   }
@@ -265,6 +329,10 @@ class _Bio1BinaryCodec {
     required String sessionId,
     required List<SignalFrame> frames,
     required Map<String, ChannelDescriptor> channels,
+    required int payloadOffset,
+    required int frameVersion,
+    required String decodeStatus,
+    required String transport,
   }) {
     final timestampsUs = <int>[];
     final channelSamples = <String, List<double>>{
@@ -276,7 +344,7 @@ class _Bio1BinaryCodec {
       'imu_gz': <double>[],
     };
     for (var index = 0; index < sampleCount; index++) {
-      final offset = 11 + index * sampleSize;
+      final offset = payloadOffset + index * sampleSize;
       timestampsUs.add(_readUint64Le(data, offset));
       channelSamples['imu_ax']!.add(data.getInt16(offset + 8, Endian.little).toDouble());
       channelSamples['imu_ay']!.add(data.getInt16(offset + 10, Endian.little).toDouble());
@@ -314,6 +382,9 @@ class _Bio1BinaryCodec {
           sampleRate: sampleRate,
           timestampsUs: timestampsUs,
           samples: entry.value,
+          transport: transport,
+          frameVersion: frameVersion,
+          decodeStatus: decodeStatus,
         ),
       );
     }
@@ -328,6 +399,9 @@ class _Bio1BinaryCodec {
     required double sampleRate,
     required List<int> timestampsUs,
     required List<double> samples,
+    required String transport,
+    required int frameVersion,
+    required String decodeStatus,
   }) {
     final sampleTimestampsMs = timestampsUs
         .map((int timestampUs) => timestampUs ~/ 1000)
@@ -343,6 +417,11 @@ class _Bio1BinaryCodec {
       quality: 1.0,
       samples: samples,
       sampleTimestampsMs: sampleTimestampsMs,
+      transport: transport,
+      receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+      sourceSeq: seq,
+      frameVersion: frameVersion,
+      decodeStatus: decodeStatus,
     );
   }
 
@@ -376,16 +455,38 @@ class _Bio1BinaryCodec {
     }
   }
 
-  static int _indexOfMagic(Uint8List bytes, int start) {
+  static int _indexOfMagic(Uint8List bytes, int start, int versionByte) {
     for (var index = start; index <= bytes.length - 4; index++) {
       if (bytes[index] == 0x42 &&
           bytes[index + 1] == 0x49 &&
           bytes[index + 2] == 0x4F &&
-          bytes[index + 3] == 0x31) {
+          bytes[index + 3] == versionByte) {
         return index;
       }
     }
     return -1;
+  }
+
+  static int _firstNonNegative(int a, int b) {
+    if (a < 0) {
+      return b;
+    }
+    if (b < 0) {
+      return a;
+    }
+    return a < b ? a : b;
+  }
+
+  static int _crc32(Uint8List bytes, int offset, int length) {
+    var crc = 0xFFFFFFFF;
+    for (var index = offset; index < offset + length; index++) {
+      crc ^= bytes[index];
+      for (var bit = 0; bit < 8; bit++) {
+        final mask = -(crc & 1);
+        crc = (crc >> 1) ^ (0xEDB88320 & mask);
+      }
+    }
+    return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
   }
 
   static int _readUint64Le(ByteData data, int offset) {
@@ -424,6 +525,8 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       StreamController<AdapterStatus>.broadcast();
   final StreamController<List<ChannelDescriptor>> _catalogController =
       StreamController<List<ChannelDescriptor>>.broadcast();
+  final StreamController<TransportStats> _statsController =
+      StreamController<TransportStats>.broadcast();
   final Uuid _uuid = const Uuid();
 
   MqttBrowserClient? _client;
@@ -441,6 +544,9 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
 
   @override
   Stream<List<ChannelDescriptor>> get streamCatalog => _catalogController.stream;
+
+  @override
+  Stream<TransportStats> get streamTransportStats => _statsController.stream;
 
   @override
   Future<void> connect() async {
@@ -598,6 +704,9 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
         if (!frameJson.containsKey('channelKey')) {
           frameJson['channelKey'] = topic.split('/').last;
         }
+        frameJson['transport'] = frameJson['transport'] ?? 'mqtt_json';
+        frameJson['receivedAtMs'] = DateTime.now().millisecondsSinceEpoch;
+        frameJson['sourceSeq'] = frameJson['sourceSeq'] ?? frameJson['seq'];
         _frameController.add(SignalFrame.fromJson(frameJson));
         continue;
       }
@@ -605,6 +714,11 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       if (topic.endsWith('/status')) {
         final message = (jsonMap['message'] ?? '设备状态更新').toString();
         _emitStatus(AdapterState.streaming, message);
+        continue;
+      }
+
+      if (topic.endsWith('/metrics')) {
+        _statsController.add(TransportStats.fromMqttMetrics(jsonMap));
         continue;
       }
 
@@ -624,9 +738,10 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       payloadBytes,
       deviceId: config.deviceId,
       sessionId: _binarySessionId,
+      transport: 'mqtt_binary',
     );
     if (batch.isEmpty) {
-      _emitStatus(AdapterState.error, 'MQTT BIO1 frame parse failed on $topic');
+      _emitStatus(AdapterState.error, 'MQTT BIO frame parse failed on $topic');
       return true;
     }
 
@@ -638,7 +753,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       _hasSeenBinaryPayload = true;
       _emitStatus(
         AdapterState.streaming,
-        'MQTT BIO1 binary stream active, ${catalog.length} channels',
+        'MQTT BIO binary stream active, ${catalog.length} channels',
       );
     }
     return true;
@@ -694,6 +809,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     _frameController.close();
     _statusController.close();
     _catalogController.close();
+    _statsController.close();
   }
 }
 
@@ -706,6 +822,8 @@ class FileReplayAdapter implements DataSourceAdapter {
       StreamController<AdapterStatus>.broadcast();
   final StreamController<List<ChannelDescriptor>> _catalogController =
       StreamController<List<ChannelDescriptor>>.broadcast();
+  final StreamController<TransportStats> _statsController =
+      StreamController<TransportStats>.broadcast();
   final Uuid _uuid = const Uuid();
 
   final List<String> _palette = const <String>[
@@ -736,6 +854,9 @@ class FileReplayAdapter implements DataSourceAdapter {
 
   @override
   Stream<List<ChannelDescriptor>> get streamCatalog => _catalogController.stream;
+
+  @override
+  Stream<TransportStats> get streamTransportStats => _statsController.stream;
 
   Future<void> pickFile() async {
     final result = await FilePicker.platform.pickFiles(
@@ -1032,6 +1153,7 @@ class FileReplayAdapter implements DataSourceAdapter {
     _frameController.close();
     _statusController.close();
     _catalogController.close();
+    _statsController.close();
   }
 }
 
@@ -1045,6 +1167,8 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       StreamController<AdapterStatus>.broadcast();
   final StreamController<List<ChannelDescriptor>> _catalogController =
       StreamController<List<ChannelDescriptor>>.broadcast();
+  final StreamController<TransportStats> _statsController =
+      StreamController<TransportStats>.broadcast();
 
   dynamic _device;
   dynamic _server;
@@ -1066,6 +1190,9 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
 
   @override
   Stream<List<ChannelDescriptor>> get streamCatalog => _catalogController.stream;
+
+  @override
+  Stream<TransportStats> get streamTransportStats => _statsController.stream;
 
   @override
   Future<void> connect() async {
@@ -1230,23 +1357,55 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       return false;
     }
 
-    final typeByte = _receiveBuffer[4];
+    final isBio2 = _receiveBuffer[3] == 0x32;
+    final headerLength = isBio2 ? 19 : 11;
+    if (_receiveBuffer.length < headerLength) {
+      return false;
+    }
+
+    final typeByte = _receiveBuffer[isBio2 ? 5 : 4];
     final sampleSize = _sampleSizeForType(typeByte);
     if (sampleSize == null) {
       _receiveBuffer.removeAt(0);
       return true;
     }
 
-    final header = ByteData.sublistView(Uint8List.fromList(_receiveBuffer.sublist(0, 11)));
-    final sampleCount = header.getUint16(9, Endian.little);
-    final frameLength = 11 + sampleCount * sampleSize;
+    final header = ByteData.sublistView(Uint8List.fromList(_receiveBuffer.sublist(0, headerLength)));
+    final sampleCount = isBio2
+        ? header.getUint16(11, Endian.little)
+        : header.getUint16(9, Endian.little);
+    final payloadLength = isBio2
+        ? header.getUint16(13, Endian.little)
+        : sampleCount * sampleSize;
+    final frameLength = headerLength + payloadLength;
+    if (payloadLength != sampleCount * sampleSize) {
+      _receiveBuffer.removeAt(0);
+      return true;
+    }
     if (_receiveBuffer.length < frameLength) {
       return false;
     }
 
     final frameBytes = Uint8List.fromList(_receiveBuffer.sublist(0, frameLength));
     _receiveBuffer.removeRange(0, frameLength);
-    _handleBinaryFrame(frameBytes);
+    if (isBio2) {
+      final batch = _Bio1BinaryCodec.decode(
+        frameBytes,
+        deviceId: _deviceId,
+        sessionId: _sessionId,
+        transport: 'ble_binary',
+      );
+      if (batch.isEmpty) {
+        _emitStatus(AdapterState.error, 'BLE BIO frame parse failed');
+      } else {
+        _mergeCatalog(batch.channels);
+        for (final frame in batch.frames) {
+          _frameController.add(frame);
+        }
+      }
+    } else {
+      _handleBinaryFrame(frameBytes);
+    }
     return true;
   }
 
@@ -1276,7 +1435,14 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     }
 
     if (type == 'frame' && payload is Map<String, dynamic>) {
-      _frameController.add(SignalFrame.fromJson(payload));
+      _frameController.add(
+        SignalFrame.fromJson(<String, dynamic>{
+          ...payload,
+          'transport': payload['transport'] ?? 'ble_json',
+          'receivedAtMs': DateTime.now().millisecondsSinceEpoch,
+          'sourceSeq': payload['sourceSeq'] ?? payload['seq'],
+        }),
+      );
       return;
     }
 
@@ -1293,7 +1459,14 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     }
 
     if (decoded.containsKey('channelKey')) {
-      _frameController.add(SignalFrame.fromJson(decoded));
+      _frameController.add(
+        SignalFrame.fromJson(<String, dynamic>{
+          ...decoded,
+          'transport': decoded['transport'] ?? 'ble_json',
+          'receivedAtMs': DateTime.now().millisecondsSinceEpoch,
+          'sourceSeq': decoded['sourceSeq'] ?? decoded['seq'],
+        }),
+      );
     }
   }
 
@@ -1513,6 +1686,11 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
         quality: 1.0,
         samples: samples,
         sampleTimestampsMs: sampleTimestampsMs,
+        transport: 'ble_binary',
+        receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+        sourceSeq: seq,
+        frameVersion: 1,
+        decodeStatus: 'ok',
       ),
     );
   }
@@ -1586,7 +1764,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       if (buffer[index] == 0x42 &&
           buffer[index + 1] == 0x49 &&
           buffer[index + 2] == 0x4F &&
-          buffer[index + 3] == 0x31) {
+          (buffer[index + 3] == 0x31 || buffer[index + 3] == 0x32)) {
         return index;
       }
     }
@@ -1731,6 +1909,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     _frameController.close();
     _statusController.close();
     _catalogController.close();
+    _statsController.close();
   }
 }
 

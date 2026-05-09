@@ -29,6 +29,73 @@ class AdapterStatus {
   final DateTime updatedAt;
 }
 
+class TransportStats {
+  const TransportStats({
+    required this.source,
+    required this.updatedAtMs,
+    this.deviceId = '',
+    this.sessionId = '',
+    this.queueDepth = const <String, int>{},
+    this.dropCount = const <String, int>{},
+    this.overwriteCount = const <String, int>{},
+    this.publishFailCount = 0,
+    this.decodeErrorCount = 0,
+    this.crcErrorCount = 0,
+    this.wifiReconnectCount = 0,
+    this.lastPublishLatencyMs = 0,
+    this.ingestLatencyMs = 0,
+    this.metadata = const <String, dynamic>{},
+  });
+
+  final String source;
+  final int updatedAtMs;
+  final String deviceId;
+  final String sessionId;
+  final Map<String, int> queueDepth;
+  final Map<String, int> dropCount;
+  final Map<String, int> overwriteCount;
+  final int publishFailCount;
+  final int decodeErrorCount;
+  final int crcErrorCount;
+  final int wifiReconnectCount;
+  final int lastPublishLatencyMs;
+  final int ingestLatencyMs;
+  final Map<String, dynamic> metadata;
+
+  factory TransportStats.fromMqttMetrics(Map<String, dynamic> json) {
+    int intValue(String key) => (json[key] as num?)?.toInt() ?? 0;
+    Map<String, int> mapValue(String key) {
+      final raw = json[key];
+      if (raw is Map<String, dynamic>) {
+        return raw.map((String k, dynamic v) => MapEntry(k, (v as num?)?.toInt() ?? 0));
+      }
+      return const <String, int>{};
+    }
+
+    return TransportStats(
+      source: 'firmware_mqtt',
+      updatedAtMs: intValue('timestampMs'),
+      deviceId: (json['deviceId'] ?? '').toString(),
+      sessionId: (json['sessionId'] ?? '').toString(),
+      queueDepth: <String, int>{
+        'ecg': intValue('ecgQueueLen'),
+        'ppg': intValue('ppgQueueLen'),
+        'imu': intValue('imuQueueLen'),
+      },
+      dropCount: <String, int>{
+        'ecg': intValue('ecgDropCount'),
+        'ppg': intValue('ppgDropCount'),
+        'imu': intValue('imuDropCount'),
+      },
+      overwriteCount: mapValue('ow'),
+      publishFailCount: intValue('mqttPublishFailCount'),
+      wifiReconnectCount: intValue('wifiReconnectCount'),
+      lastPublishLatencyMs: intValue('lastPublishLatencyMs'),
+      metadata: json,
+    );
+  }
+}
+
 class ChannelDescriptor {
   const ChannelDescriptor({
     required this.key,
@@ -99,6 +166,11 @@ class SignalFrame {
     required this.quality,
     required this.samples,
     this.sampleTimestampsMs,
+    this.transport = 'unknown',
+    this.receivedAtMs = 0,
+    this.sourceSeq,
+    this.frameVersion = 1,
+    this.decodeStatus = 'ok',
   });
 
   final String deviceId;
@@ -111,6 +183,11 @@ class SignalFrame {
   final double quality;
   final List<double> samples;
   final List<int>? sampleTimestampsMs;
+  final String transport;
+  final int receivedAtMs;
+  final int? sourceSeq;
+  final int frameVersion;
+  final String decodeStatus;
 
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
@@ -124,6 +201,11 @@ class SignalFrame {
       'quality': quality,
       'samples': samples,
       if (sampleTimestampsMs != null) 'sampleTimestampsMs': sampleTimestampsMs,
+      'transport': transport,
+      if (receivedAtMs > 0) 'receivedAtMs': receivedAtMs,
+      if (sourceSeq != null) 'sourceSeq': sourceSeq,
+      'frameVersion': frameVersion,
+      'decodeStatus': decodeStatus,
     };
   }
 
@@ -143,6 +225,11 @@ class SignalFrame {
       samples: rawSamples.map((dynamic item) => (item as num).toDouble()).toList(),
       sampleTimestampsMs:
           rawTimestamps?.map((dynamic item) => (item as num).toInt()).toList(),
+      transport: (json['transport'] ?? 'unknown') as String,
+      receivedAtMs: (json['receivedAtMs'] as num?)?.toInt() ?? 0,
+      sourceSeq: (json['sourceSeq'] as num?)?.toInt(),
+      frameVersion: (json['frameVersion'] as num?)?.toInt() ?? 1,
+      decodeStatus: (json['decodeStatus'] ?? 'ok') as String,
     );
   }
 }

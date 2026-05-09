@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <string>
+#include <string.h>
 
 #include "config.h"
 #include "data_logger.h"
@@ -17,6 +19,9 @@ QueueHandle_t g_imuBleQueue = nullptr;
 
 bool g_connected = false;
 bool g_subscribed = false;
+bool g_enableEcg = true;
+bool g_enablePpg = true;
+bool g_enableImu = true;
 uint16_t g_mtu = 23;
 size_t g_notifyPayloadMax = BLE_NOTIFY_PAYLOAD_FALLBACK;
 
@@ -76,6 +81,57 @@ class BleCharCallbacks : public NimBLECharacteristicCallbacks {
   }
 };
 
+bool textContains(const char* text, const char* needle) {
+  return text != nullptr && needle != nullptr && strstr(text, needle) != nullptr;
+}
+
+void resetCounters() {
+  g_dropEcg = 0;
+  g_dropPpg = 0;
+  g_dropImu = 0;
+  g_overwriteEcg = 0;
+  g_overwritePpg = 0;
+  g_overwriteImu = 0;
+  g_notifyFail = 0;
+}
+
+void handleControlPayload(const char* payload) {
+  if (payload == nullptr) {
+    return;
+  }
+  if (textContains(payload, "reset_counters")) {
+    resetCounters();
+    data_logger::logStatus("[BLE] control reset_counters.");
+    return;
+  }
+  if (textContains(payload, "set_channels")) {
+    g_enableEcg = textContains(payload, "\"ecg\"");
+    g_enablePpg = textContains(payload, "\"ppg\"") ||
+                  textContains(payload, "\"ppg_ir\"") ||
+                  textContains(payload, "\"ppg_red\"");
+    g_enableImu = textContains(payload, "\"imu\"") ||
+                  textContains(payload, "\"imu_ax\"") ||
+                  textContains(payload, "\"imu_gx\"");
+    data_logger::logStatus("[BLE] control set_channels.");
+  }
+}
+
+class BleControlCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c) override {
+    if (c == nullptr) {
+      return;
+    }
+    const std::string value = c->getValue();
+    char buffer[256];
+    const size_t copyLen = value.size() < (sizeof(buffer) - 1U)
+        ? value.size()
+        : (sizeof(buffer) - 1U);
+    memcpy(buffer, value.data(), copyLen);
+    buffer[copyLen] = '\0';
+    handleControlPayload(buffer);
+  }
+};
+
 template <typename T>
 bool enqueueDroppingOldest(QueueHandle_t queue, const T& sample, bool* overwrote) {
   if (queue == nullptr) {
@@ -116,6 +172,57 @@ void appendU64Le(uint8_t* dst, const uint64_t v) {
   }
 }
 
+uint32_t crc32(const uint8_t* data, const size_t len) {
+  uint32_t crc = 0xFFFFFFFFUL;
+  for (size_t i = 0; i < len; ++i) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      const uint32_t mask = 0U - (crc & 1U);
+      crc = (crc >> 1U) ^ (0xEDB88320UL & mask);
+    }
+  }
+  return crc ^ 0xFFFFFFFFUL;
+}
+
+size_t beginBio2Frame(uint8_t* payload,
+                      const size_t capacity,
+                      const char type,
+                      const uint32_t seq,
+                      const uint16_t sampleCount,
+                      const uint16_t payloadLen) {
+  if (payload == nullptr || capacity < 19U) {
+    return 0;
+  }
+  size_t off = 0;
+  payload[off++] = 'B';
+  payload[off++] = 'I';
+  payload[off++] = 'O';
+  payload[off++] = '2';
+  payload[off++] = 1;
+  payload[off++] = static_cast<uint8_t>(type);
+  payload[off++] = 0;
+  appendU32Le(&payload[off], seq);
+  off += 4;
+  appendU16Le(&payload[off], sampleCount);
+  off += 2;
+  appendU16Le(&payload[off], payloadLen);
+  off += 2;
+  appendU32Le(&payload[off], 0);
+  off += 4;
+  return off;
+}
+
+void finishBio2Frame(uint8_t* payload, const size_t payloadOffset, const size_t payloadLen) {
+  appendU32Le(&payload[15], crc32(payload + payloadOffset, payloadLen));
+}
+
+size_t maxSamplesForNotify(const size_t sampleSize, const size_t hardMax) {
+  if (g_notifyPayloadMax <= 19U || sampleSize == 0) {
+    return 0;
+  }
+  return minSize(hardMax, (g_notifyPayloadMax - 19U) / sampleSize);
+}
+
 template <typename T>
 size_t dequeueBatch(QueueHandle_t queue, T* batch, const size_t batchMax) {
   if (queue == nullptr || batch == nullptr || batchMax == 0) {
@@ -137,22 +244,24 @@ bool sendNotifyPayload(const uint8_t* payload, const size_t len) {
     return true;
   }
 
-  // Only send data that fits in a single notify to avoid flooding the receiver.
-  // If the payload exceeds the negotiated MTU payload, truncate it.
-  const size_t sendLen = minSize(g_notifyPayloadMax, len);
-  g_notifyChar->setValue(payload, sendLen);
+  if (len > g_notifyPayloadMax) {
+    ++g_notifyFail;
+    return false;
+  }
+  g_notifyChar->setValue(payload, len);
   // NimBLE-Arduino notify() returns void in this version. Treat as fire-and-forget.
   g_notifyChar->notify();
   return true;
 }
 
 void publishEcgSamples() {
-  if (g_ecgBleQueue == nullptr) {
+  if (!g_enableEcg || g_ecgBleQueue == nullptr) {
     return;
   }
 
   EcgSample batch[kEcgBatchMax];
-  const size_t n = dequeueBatch(g_ecgBleQueue, batch, kEcgBatchMax);
+  const size_t batchMax = maxSamplesForNotify(12U, kEcgBatchMax);
+  const size_t n = dequeueBatch(g_ecgBleQueue, batch, batchMax);
   if (n == 0) {
     return;
   }
@@ -160,16 +269,9 @@ void publishEcgSamples() {
   const uint32_t seq = g_bleSeq++;
 
   uint8_t payload[kBlePayloadBuffer] = {};
-  size_t off = 0;
-  payload[off++] = 'B';
-  payload[off++] = 'I';
-  payload[off++] = 'O';
-  payload[off++] = '1';
-  payload[off++] = static_cast<uint8_t>('E');
-  appendU32Le(&payload[off], seq);
-  off += 4;
-  appendU16Le(&payload[off], static_cast<uint16_t>(n));
-  off += 2;
+  const uint16_t payloadLen = static_cast<uint16_t>(n * 12U);
+  const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'E', seq, static_cast<uint16_t>(n), payloadLen);
+  size_t off = payloadOffset;
 
   for (size_t i = 0; i < n; ++i) {
     if (off + 12 > sizeof(payload)) {
@@ -182,17 +284,19 @@ void publishEcgSamples() {
     payload[off++] = static_cast<uint8_t>(batch[i].lead_off_plus ? 1 : 0);
     payload[off++] = static_cast<uint8_t>(batch[i].lead_off_minus ? 1 : 0);
   }
+  finishBio2Frame(payload, payloadOffset, off - payloadOffset);
 
   (void)sendNotifyPayload(payload, off);
 }
 
 void publishPpgSamples() {
-  if (g_ppgBleQueue == nullptr) {
+  if (!g_enablePpg || g_ppgBleQueue == nullptr) {
     return;
   }
 
   PpgSample batch[kPpgBatchMax];
-  const size_t n = dequeueBatch(g_ppgBleQueue, batch, kPpgBatchMax);
+  const size_t batchMax = maxSamplesForNotify(16U, kPpgBatchMax);
+  const size_t n = dequeueBatch(g_ppgBleQueue, batch, batchMax);
   if (n == 0) {
     return;
   }
@@ -200,16 +304,9 @@ void publishPpgSamples() {
   const uint32_t seq = g_bleSeq++;
 
   uint8_t payload[kBlePayloadBuffer] = {};
-  size_t off = 0;
-  payload[off++] = 'B';
-  payload[off++] = 'I';
-  payload[off++] = 'O';
-  payload[off++] = '1';
-  payload[off++] = static_cast<uint8_t>('P');
-  appendU32Le(&payload[off], seq);
-  off += 4;
-  appendU16Le(&payload[off], static_cast<uint16_t>(n));
-  off += 2;
+  const uint16_t payloadLen = static_cast<uint16_t>(n * 16U);
+  const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'P', seq, static_cast<uint16_t>(n), payloadLen);
+  size_t off = payloadOffset;
 
   for (size_t i = 0; i < n; ++i) {
     if (off + 16 > sizeof(payload)) {
@@ -222,17 +319,19 @@ void publishPpgSamples() {
     appendU32Le(&payload[off], batch[i].red);
     off += 4;
   }
+  finishBio2Frame(payload, payloadOffset, off - payloadOffset);
 
   (void)sendNotifyPayload(payload, off);
 }
 
 void publishImuSamples() {
-  if (g_imuBleQueue == nullptr) {
+  if (!g_enableImu || g_imuBleQueue == nullptr) {
     return;
   }
 
   ImuSample batch[kImuBatchMax];
-  const size_t n = dequeueBatch(g_imuBleQueue, batch, kImuBatchMax);
+  const size_t batchMax = maxSamplesForNotify(20U, kImuBatchMax);
+  const size_t n = dequeueBatch(g_imuBleQueue, batch, batchMax);
   if (n == 0) {
     return;
   }
@@ -240,16 +339,9 @@ void publishImuSamples() {
   const uint32_t seq = g_bleSeq++;
 
   uint8_t payload[kBlePayloadBuffer] = {};
-  size_t off = 0;
-  payload[off++] = 'B';
-  payload[off++] = 'I';
-  payload[off++] = 'O';
-  payload[off++] = '1';
-  payload[off++] = static_cast<uint8_t>('I');
-  appendU32Le(&payload[off], seq);
-  off += 4;
-  appendU16Le(&payload[off], static_cast<uint16_t>(n));
-  off += 2;
+  const uint16_t payloadLen = static_cast<uint16_t>(n * 20U);
+  const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'I', seq, static_cast<uint16_t>(n), payloadLen);
+  size_t off = payloadOffset;
 
   for (size_t i = 0; i < n; ++i) {
     if (off + 20 > sizeof(payload)) {
@@ -270,6 +362,7 @@ void publishImuSamples() {
     appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_z));
     off += 2;
   }
+  finishBio2Frame(payload, payloadOffset, off - payloadOffset);
 
   (void)sendNotifyPayload(payload, off);
 }
@@ -289,6 +382,7 @@ void begin() {
   g_notifyChar = service->createCharacteristic(NimBLEUUID(BLE_NOTIFY_CHAR_UUID), NIMBLE_PROPERTY::NOTIFY);
   g_controlChar = service->createCharacteristic(NimBLEUUID(BLE_CONTROL_CHAR_UUID), NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   g_notifyChar->setCallbacks(new BleCharCallbacks());
+  g_controlChar->setCallbacks(new BleControlCallbacks());
   service->start();
 
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
@@ -372,5 +466,3 @@ void taskLoop() {
 }
 
 }  // namespace ble_stream
-
-

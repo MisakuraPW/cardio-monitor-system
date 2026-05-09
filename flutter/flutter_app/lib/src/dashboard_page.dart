@@ -153,6 +153,8 @@ class _DashboardPageState extends State<DashboardPage> {
           if (_sidePanelIndex == 0) ...<Widget>[
             _buildDataSourceCard(context),
             const SizedBox(height: 16),
+            _buildTransportDiagnosticsCard(context),
+            const SizedBox(height: 16),
             _buildStatusLogCard(context),
           ] else ...<Widget>[
             _buildDisplayControlCard(context),
@@ -565,6 +567,54 @@ class _DashboardPageState extends State<DashboardPage> {
         ),
       ),
     );
+  }
+
+  Widget _buildTransportDiagnosticsCard(BuildContext context) {
+    final stats = _controller.transportStats;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text('Transport diagnostics', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 12),
+            if (stats.isEmpty)
+              const Text('Waiting for firmware/server metrics.'),
+            for (final TransportStats item in stats) ...<Widget>[
+              Text('${item.source} ${item.deviceId.isEmpty ? '' : '· ${item.deviceId}'}'),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  _MetricChip(label: 'pub fail', value: '${item.publishFailCount}'),
+                  _MetricChip(label: 'crc', value: '${item.crcErrorCount}'),
+                  _MetricChip(label: 'decode', value: '${item.decodeErrorCount}'),
+                  _MetricChip(label: 'wifi', value: '${item.wifiReconnectCount}'),
+                  _MetricChip(label: 'latency', value: '${item.lastPublishLatencyMs} ms'),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _buildStatsMap('queue', item.queueDepth),
+              _buildStatsMap('drop', item.dropCount),
+              _buildStatsMap('overwrite', item.overwriteCount),
+              const SizedBox(height: 12),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatsMap(String label, Map<String, int> values) {
+    if (values.isEmpty) {
+      return Text('$label: -');
+    }
+    final text = values.entries
+        .map((MapEntry<String, int> item) => '${item.key}=${item.value}')
+        .join('  ');
+    return Text('$label: $text');
   }
 
   Widget _buildWaveformArea(BuildContext context) {

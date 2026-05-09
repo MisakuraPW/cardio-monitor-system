@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <string.h>
 
 #include "config.h"
 #include "data_logger.h"
@@ -25,6 +26,9 @@ uint32_t g_lastMqttRetryMs = 0;
 uint32_t g_lastDiagPublishMs = 0;
 bool g_wifiConnectInProgress = false;
 uint32_t g_wifiConnectStartMs = 0;
+bool g_enableEcg = true;
+bool g_enablePpg = true;
+bool g_enableImu = true;
 
 uint32_t g_dropEcg = 0;
 uint32_t g_dropPpg = 0;
@@ -60,6 +64,7 @@ constexpr bool kBinaryPayloadEnabled = (MQTT_PAYLOAD_MODE == 1) || (MQTT_PAYLOAD
 char g_sessionId[48] = {};
 char g_topicStatus[96] = {};
 char g_topicMetrics[96] = {};
+char g_topicControl[96] = {};
 char g_topicWaveEcg[96] = {};
 char g_topicWavePpgIr[96] = {};
 char g_topicWavePpgRed[96] = {};
@@ -112,6 +117,50 @@ void appendU64Le(uint8_t* dst, const uint64_t v) {
   for (uint8_t i = 0; i < 8; ++i) {
     dst[i] = static_cast<uint8_t>((v >> (8U * i)) & 0xFFU);
   }
+}
+
+uint32_t crc32(const uint8_t* data, const size_t len) {
+  uint32_t crc = 0xFFFFFFFFUL;
+  for (size_t i = 0; i < len; ++i) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      const uint32_t mask = 0U - (crc & 1U);
+      crc = (crc >> 1U) ^ (0xEDB88320UL & mask);
+    }
+  }
+  return crc ^ 0xFFFFFFFFUL;
+}
+
+size_t beginBio2Frame(uint8_t* payload,
+                      const size_t capacity,
+                      const char type,
+                      const uint32_t seq,
+                      const uint16_t sampleCount,
+                      const uint16_t payloadLen) {
+  if (payload == nullptr || capacity < 19U) {
+    return 0;
+  }
+  size_t off = 0;
+  payload[off++] = 'B';
+  payload[off++] = 'I';
+  payload[off++] = 'O';
+  payload[off++] = '2';
+  payload[off++] = 1;  // BIO2 header version
+  payload[off++] = static_cast<uint8_t>(type);
+  payload[off++] = 0;  // flags
+  appendU32Le(&payload[off], seq);
+  off += 4;
+  appendU16Le(&payload[off], sampleCount);
+  off += 2;
+  appendU16Le(&payload[off], payloadLen);
+  off += 2;
+  appendU32Le(&payload[off], 0);
+  off += 4;
+  return off;
+}
+
+void finishBio2Frame(uint8_t* payload, const size_t payloadOffset, const size_t payloadLen) {
+  appendU32Le(&payload[15], crc32(payload + payloadOffset, payloadLen));
 }
 
 uint16_t queueFillPermille(QueueHandle_t queue, const uint32_t queueLen) {
@@ -174,6 +223,7 @@ void buildClientId() {
 void buildTopics() {
   snprintf(g_topicStatus, sizeof(g_topicStatus), "%s/%s/status", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicMetrics, sizeof(g_topicMetrics), "%s/%s/metrics", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
+  snprintf(g_topicControl, sizeof(g_topicControl), "%s/%s/control", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWaveEcg, sizeof(g_topicWaveEcg), "%s/%s/waveform/ecg", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWavePpgIr, sizeof(g_topicWavePpgIr), "%s/%s/waveform/ppg_ir", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWavePpgRed, sizeof(g_topicWavePpgRed), "%s/%s/waveform/ppg_red", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
@@ -186,6 +236,66 @@ void buildTopics() {
   snprintf(g_topicWaveBinEcg, sizeof(g_topicWaveBinEcg), "%s/%s/waveform_bin/ecg", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWaveBinPpg, sizeof(g_topicWaveBinPpg), "%s/%s/waveform_bin/ppg", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWaveBinImu, sizeof(g_topicWaveBinImu), "%s/%s/waveform_bin/imu", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
+}
+
+bool textContains(const char* text, const char* needle) {
+  return text != nullptr && needle != nullptr && strstr(text, needle) != nullptr;
+}
+
+void publishDiagTelemetry();
+
+void resetCounters() {
+  g_dropEcg = 0;
+  g_dropPpg = 0;
+  g_dropImu = 0;
+  g_overwriteEcg = 0;
+  g_overwritePpg = 0;
+  g_overwriteImu = 0;
+  g_mqttPublishFailCount = 0;
+  g_wifiReconnectCount = 0;
+  g_ppgPressureDecimateCounter = 0;
+  g_imuPressureDecimateCounter = 0;
+}
+
+void handleControlPayload(const char* payload) {
+  if (payload == nullptr) {
+    return;
+  }
+  if (textContains(payload, "reset_counters")) {
+    resetCounters();
+    data_logger::logStatus("[NET] MQTT control reset_counters.");
+    return;
+  }
+  if (textContains(payload, "set_channels")) {
+    g_enableEcg = textContains(payload, "\"ecg\"");
+    g_enablePpg = textContains(payload, "\"ppg\"") ||
+                  textContains(payload, "\"ppg_ir\"") ||
+                  textContains(payload, "\"ppg_red\"");
+    g_enableImu = textContains(payload, "\"imu\"") ||
+                  textContains(payload, "\"imu_ax\"") ||
+                  textContains(payload, "\"imu_gx\"");
+    data_logger::logStatus("[NET] MQTT control set_channels.");
+    return;
+  }
+  if (textContains(payload, "ping")) {
+    publishDiagTelemetry();
+    return;
+  }
+  if (textContains(payload, "set_payload_mode") || textContains(payload, "set_sample_rates")) {
+    data_logger::logStatus("[NET] MQTT control accepted for host-side diagnostics.");
+  }
+}
+
+void onMqttMessage(char* topic, uint8_t* payload, unsigned int length) {
+  if (topic == nullptr || strcmp(topic, g_topicControl) != 0) {
+    return;
+  }
+  char buffer[256];
+  const unsigned int limit = static_cast<unsigned int>(sizeof(buffer) - 1U);
+  const unsigned int copyLen = length < limit ? length : limit;
+  memcpy(buffer, payload, copyLen);
+  buffer[copyLen] = '\0';
+  handleControlPayload(buffer);
 }
 
 uint64_t tsUsToMs(const uint64_t tsUs) {
@@ -391,6 +501,7 @@ bool ensureMqttConnected() {
            g_sessionId,
            static_cast<unsigned long>(millis()));
   (void)publishTextTracked(g_topicStatus, onlinePayload, true);
+  (void)g_mqttClient.subscribe(g_topicControl, 1);
   data_logger::logStatus("[NET] MQTT connected.");
   return true;
 }
@@ -468,18 +579,10 @@ void publishEcgSamples() {
   }
 
   if (kBinaryPayloadEnabled) {
-    // Frame: magic(4)='BIO1', type(1), seq_u32_le(4), n_u16_le(2), samples(...)
     uint8_t payload[kMqttPayloadBuffer] = {};
-    size_t off = 0;
-    payload[off++] = 'B';
-    payload[off++] = 'I';
-    payload[off++] = 'O';
-    payload[off++] = '1';
-    payload[off++] = static_cast<uint8_t>('E');
-    appendU32Le(&payload[off], seq);
-    off += 4;
-    appendU16Le(&payload[off], static_cast<uint16_t>(n));
-    off += 2;
+    const uint16_t payloadLen = static_cast<uint16_t>(n * 12U);
+    const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'E', seq, static_cast<uint16_t>(n), payloadLen);
+    size_t off = payloadOffset;
 
     for (size_t i = 0; i < n; ++i) {
       if (off + 12 > sizeof(payload)) {
@@ -492,6 +595,7 @@ void publishEcgSamples() {
       payload[off++] = static_cast<uint8_t>(batch[i].lead_off_plus ? 1 : 0);
       payload[off++] = static_cast<uint8_t>(batch[i].lead_off_minus ? 1 : 0);
     }
+    finishBio2Frame(payload, payloadOffset, off - payloadOffset);
 
     if (!publishBinaryTracked(g_topicWaveBinEcg, payload, off, false)) {
       data_logger::logStatus("[NET] MQTT ECG BIN publish failed.");
@@ -542,16 +646,9 @@ void publishPpgSamples() {
 
   if (kBinaryPayloadEnabled) {
     uint8_t payload[kMqttPayloadBuffer] = {};
-    size_t off = 0;
-    payload[off++] = 'B';
-    payload[off++] = 'I';
-    payload[off++] = 'O';
-    payload[off++] = '1';
-    payload[off++] = static_cast<uint8_t>('P');
-    appendU32Le(&payload[off], seq);
-    off += 4;
-    appendU16Le(&payload[off], static_cast<uint16_t>(n));
-    off += 2;
+    const uint16_t payloadLen = static_cast<uint16_t>(n * 16U);
+    const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'P', seq, static_cast<uint16_t>(n), payloadLen);
+    size_t off = payloadOffset;
 
     for (size_t i = 0; i < n; ++i) {
       if (off + 16 > sizeof(payload)) {
@@ -564,6 +661,7 @@ void publishPpgSamples() {
       appendU32Le(&payload[off], batch[i].red);
       off += 4;
     }
+    finishBio2Frame(payload, payloadOffset, off - payloadOffset);
 
     if (!publishBinaryTracked(g_topicWaveBinPpg, payload, off, false)) {
       data_logger::logStatus("[NET] MQTT PPG BIN publish failed.");
@@ -595,7 +693,7 @@ void publishImuSamples() {
     for (size_t i = 0; i < n; ++i) {
       valuesAx[i] = batch[i].acc_x;
       valuesAy[i] = batch[i].acc_y;
-      valuesAz[i] = batch[i].acc_z;++
+      valuesAz[i] = batch[i].acc_z;
       valuesGx[i] = batch[i].gyr_x;
       valuesGy[i] = batch[i].gyr_y;
       valuesGz[i] = batch[i].gyr_z;
@@ -615,16 +713,9 @@ void publishImuSamples() {
 
   if (kBinaryPayloadEnabled) {
     uint8_t payload[kMqttPayloadBuffer] = {};
-    size_t off = 0;
-    payload[off++] = 'B';
-    payload[off++] = 'I';
-    payload[off++] = 'O';
-    payload[off++] = '1';
-    payload[off++] = static_cast<uint8_t>('I');
-    appendU32Le(&payload[off], seq);
-    off += 4;
-    appendU16Le(&payload[off], static_cast<uint16_t>(n));
-    off += 2;
+    const uint16_t payloadLen = static_cast<uint16_t>(n * 20U);
+    const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'I', seq, static_cast<uint16_t>(n), payloadLen);
+    size_t off = payloadOffset;
 
     for (size_t i = 0; i < n; ++i) {
       if (off + 20 > sizeof(payload)) {
@@ -645,6 +736,7 @@ void publishImuSamples() {
       appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_z));
       off += 2;
     }
+    finishBio2Frame(payload, payloadOffset, off - payloadOffset);
 
     if (!publishBinaryTracked(g_topicWaveBinImu, payload, off, false)) {
       data_logger::logStatus("[NET] MQTT IMU BIN publish failed.");
@@ -696,6 +788,7 @@ void begin() {
   g_mqttClient.setServer(MQTT_BROKER_HOST, MQTT_BROKER_PORT);
   g_mqttClient.setBufferSize(kMqttPayloadBuffer + 64);
   g_mqttClient.setKeepAlive(30);
+  g_mqttClient.setCallback(onMqttMessage);
 
   char msg[128];
   snprintf(msg, sizeof(msg), "[NET] MQTT init host=%s:%d id=%s ecgBin=%s",
@@ -704,6 +797,9 @@ void begin() {
 }
 
 bool enqueueEcg(const EcgSample& sample) {
+  if (!g_enableEcg) {
+    return true;
+  }
   if (g_ecgMqttQueue == nullptr) {
     return false;
   }
@@ -720,6 +816,9 @@ bool enqueueEcg(const EcgSample& sample) {
 }
 
 bool enqueuePpg(const PpgSample& sample) {
+  if (!g_enablePpg) {
+    return true;
+  }
   if (g_ppgMqttQueue == nullptr) {
     return false;
   }
@@ -752,6 +851,9 @@ bool enqueuePpg(const PpgSample& sample) {
 }
 
 bool enqueueImu(const ImuSample& sample) {
+  if (!g_enableImu) {
+    return true;
+  }
   if (g_imuMqttQueue == nullptr) {
     return false;
   }

@@ -24,9 +24,9 @@ $env:PYTHONPATH = (Get-Location)
 ### 2. Flutter Web 上位机
 
 ```powershell
-cd flutter_app
-G:\课设\FlutterSDK\flutter\bin\flutter.bat pub get
-G:\课设\FlutterSDK\flutter\bin\flutter.bat run -d chrome
+cd flutter/flutter_app    
+G:\课设\system\cardio-monitor-system\FlutterSDK\flutter\bin\flutter.bat pub get
+G:\课设\system\cardio-monitor-system\FlutterSDK\flutter\bin\flutter.bat run -d chrome
 ```
 
 ### 3. 管理后台骨架
