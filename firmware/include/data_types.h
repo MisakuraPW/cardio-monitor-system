@@ -2,23 +2,30 @@
 
 #include <Arduino.h>
 
-enum class SensorType : uint8_t {  //强枚举，避免隐式转换，底层类型为uint8_t节省内存
+enum class SensorType : uint8_t {
   Ecg = 0,
   Ppg = 1,
   Imu = 2,
 };
 
 struct EcgSample {
-  uint64_t ts_us;  //时间戳，单位微秒，使用64位整数以避免溢出
-  uint16_t raw_adc;   //原始ADC值，AD8232输出为10位分辨率，使用16位整数存储以节省空间
-  bool lead_off_plus;   //正负导联脱落状态
+  uint64_t ts_us;
+  uint16_t raw_adc;
+  bool lead_off_plus;
   bool lead_off_minus;
+  uint16_t filtered_adc;
+  float quality;
+  uint8_t flags;
 };
 
 struct PpgSample {
   uint64_t ts_us;
-  uint32_t ir;  
+  uint32_t ir;
   uint32_t red;
+  uint32_t filtered_ir;
+  uint32_t filtered_red;
+  float quality;
+  uint8_t flags;
 };
 
 struct ImuSample {

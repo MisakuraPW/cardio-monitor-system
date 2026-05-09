@@ -12,6 +12,7 @@
 #include "ecg_adc.h"
 #include "imu_bmi160.h"
 #include "ppg_max30102.h"
+#include "signal_dsp.h"
 
 namespace {
 
@@ -132,38 +133,42 @@ struct ImuPayloadBin {
 #pragma pack(pop)
 
 void emitEcg(const EcgSample& s) {
+  EcgSample processed = s;
+  signal_dsp::processEcg(processed);
   if (kEnableWifiOutput) {
-    (void)cloud_mqtt::enqueueEcg(s);
+    (void)cloud_mqtt::enqueueEcg(processed);
   }
   if (kEnableBleOutput) {
-    (void)ble_stream::enqueueEcg(s);
+    (void)ble_stream::enqueueEcg(processed);
   }
   if (kEnableUartStream && kOutBinary) {
-    const EcgPayloadBin p{ s.ts_us, s.raw_adc,
-                           static_cast<uint8_t>(s.lead_off_plus ? 1 : 0),
-                           static_cast<uint8_t>(s.lead_off_minus ? 1 : 0) };
+    const EcgPayloadBin p{ processed.ts_us, processed.raw_adc,
+                           static_cast<uint8_t>(processed.lead_off_plus ? 1 : 0),
+                           static_cast<uint8_t>(processed.lead_off_minus ? 1 : 0) };
     (void)pushBinaryFrame('E', &p, static_cast<uint8_t>(sizeof(p)));
   }
 
   if (kEnableUartStream && (kOutVerboseText || kOutCompactText)) {
     char line[64];
     if (kOutVerboseText) {
-      snprintf(line, sizeof(line), "ECG,%llu,%u,%u,%u\n", s.ts_us, s.raw_adc,
-               s.lead_off_plus ? 1 : 0, s.lead_off_minus ? 1 : 0);
+      snprintf(line, sizeof(line), "ECG,%llu,%u,%u,%u\n", processed.ts_us, processed.raw_adc,
+               processed.lead_off_plus ? 1 : 0, processed.lead_off_minus ? 1 : 0);
     } else {
-      snprintf(line, sizeof(line), "E,%llu,%u,%u,%u\n", s.ts_us, s.raw_adc,
-               s.lead_off_plus ? 1 : 0, s.lead_off_minus ? 1 : 0);
+      snprintf(line, sizeof(line), "E,%llu,%u,%u,%u\n", processed.ts_us, processed.raw_adc,
+               processed.lead_off_plus ? 1 : 0, processed.lead_off_minus ? 1 : 0);
     }
     (void)pushTextLine(line);
   }
 }
 
 void emitPpg(const PpgSample& s) {
+  PpgSample processed = s;
+  signal_dsp::processPpg(processed);
   if (kEnableWifiOutput) {
-    (void)cloud_mqtt::enqueuePpg(s);
+    (void)cloud_mqtt::enqueuePpg(processed);
   }
   if (kEnableBleOutput) {
-    (void)ble_stream::enqueuePpg(s);
+    (void)ble_stream::enqueuePpg(processed);
   }
   if (kEnableUartStream && kOutBinary) {
     const PpgPayloadBin p{ s.ts_us, s.ir, s.red };
@@ -184,12 +189,7 @@ void emitPpg(const PpgSample& s) {
 }
 
 void emitImu(const ImuSample& s) {
-  if (kEnableWifiOutput) {
-    (void)cloud_mqtt::enqueueImu(s);
-  }
-  if (kEnableBleOutput) {
-    (void)ble_stream::enqueueImu(s);
-  }
+  signal_dsp::updateImu(s);
   if (kEnableUartStream && kOutBinary) {
     const ImuPayloadBin p{ s.ts_us, s.acc_x, s.acc_y, s.acc_z, s.gyr_x, s.gyr_y, s.gyr_z };
     (void)pushBinaryFrame('I', &p, static_cast<uint8_t>(sizeof(p)));
@@ -461,6 +461,7 @@ void setup() {
     Serial.setTxBufferSize(4096);
   }
   data_logger::logStatus(F("Initializing biosignal acquisition project..."));
+  signal_dsp::begin();
 
   if (kEnableWifiOutput) {
     cloud_mqtt::begin();
@@ -488,4 +489,3 @@ void setup() {
 }
 
 void loop() { vTaskDelay(pdMS_TO_TICKS(1000)); }
-

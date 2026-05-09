@@ -3,10 +3,12 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "config.h"
 #include "data_logger.h"
+#include "signal_dsp.h"
 
 namespace {
 
@@ -78,6 +80,8 @@ char g_topicWaveImuGz[96] = {};
 char g_topicWaveBinEcg[96] = {};
 char g_topicWaveBinPpg[96] = {};
 char g_topicWaveBinImu[96] = {};
+char g_topicWaveBinEcgFiltered[96] = {};
+char g_topicWaveBinPpgFiltered[96] = {};
 
 template <typename T>
 bool enqueueDroppingOldest(QueueHandle_t queue, const T& sample, bool* overwrote) {
@@ -237,10 +241,52 @@ void buildTopics() {
   snprintf(g_topicWaveBinEcg, sizeof(g_topicWaveBinEcg), "%s/%s/waveform_bin/ecg", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWaveBinPpg, sizeof(g_topicWaveBinPpg), "%s/%s/waveform_bin/ppg", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWaveBinImu, sizeof(g_topicWaveBinImu), "%s/%s/waveform_bin/imu", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
+  snprintf(g_topicWaveBinEcgFiltered, sizeof(g_topicWaveBinEcgFiltered), "%s/%s/waveform_bin/ecg_filtered", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
+  snprintf(g_topicWaveBinPpgFiltered, sizeof(g_topicWaveBinPpgFiltered), "%s/%s/waveform_bin/ppg_filtered", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
 }
 
 bool textContains(const char* text, const char* needle) {
   return text != nullptr && needle != nullptr && strstr(text, needle) != nullptr;
+}
+
+bool extractFloatValue(const char* text, const char* key, float* out) {
+  if (text == nullptr || key == nullptr || out == nullptr) {
+    return false;
+  }
+  const char* pos = strstr(text, key);
+  if (pos == nullptr) {
+    return false;
+  }
+  pos = strchr(pos, ':');
+  if (pos == nullptr) {
+    return false;
+  }
+  *out = static_cast<float>(atof(pos + 1));
+  return true;
+}
+
+bool extractBoolValue(const char* text, const char* key, bool* out) {
+  if (text == nullptr || key == nullptr || out == nullptr) {
+    return false;
+  }
+  const char* pos = strstr(text, key);
+  if (pos == nullptr) {
+    return false;
+  }
+  pos = strchr(pos, ':');
+  if (pos == nullptr) {
+    return false;
+  }
+  while (*(++pos) == ' ' || *pos == '"') {}
+  if (strncmp(pos, "true", 4) == 0 || *pos == '1') {
+    *out = true;
+    return true;
+  }
+  if (strncmp(pos, "false", 5) == 0 || *pos == '0') {
+    *out = false;
+    return true;
+  }
+  return false;
 }
 
 void publishDiagTelemetry();
@@ -280,6 +326,38 @@ void handleControlPayload(const char* payload) {
   }
   if (textContains(payload, "ping")) {
     publishDiagTelemetry();
+    return;
+  }
+  if (textContains(payload, "reset_dsp_state")) {
+    signal_dsp::reset();
+    data_logger::logStatus("[NET] DSP state reset.");
+    return;
+  }
+  if (textContains(payload, "set_dsp_enabled")) {
+    signal_dsp::setEnabled(textContains(payload, "true") || textContains(payload, "\"enabled\":1"));
+    data_logger::logStatus("[NET] DSP enabled updated.");
+    return;
+  }
+  if (textContains(payload, "set_dsp_params")) {
+    signal_dsp::DspParams params = signal_dsp::params();
+    bool boolValue = false;
+    float value = 0.0f;
+    if (extractBoolValue(payload, "enabled", &boolValue)) params.enabled = boolValue;
+    if (extractBoolValue(payload, "ecgNotchEnabled", &boolValue)) params.ecgNotchEnabled = boolValue;
+    if (extractBoolValue(payload, "ppgNlmsEnabled", &boolValue)) params.ppgNlmsEnabled = boolValue;
+    if (extractFloatValue(payload, "ecgHighpassHz", &value)) params.ecgHighpassHz = value;
+    if (extractFloatValue(payload, "ecgLowpassHz", &value)) params.ecgLowpassHz = value;
+    if (extractFloatValue(payload, "ecgNotchHz", &value)) params.ecgNotchHz = value;
+    if (extractFloatValue(payload, "ecgNotchQ", &value)) params.ecgNotchQ = value;
+    if (extractFloatValue(payload, "ecgPeakThreshold", &value)) params.ecgPeakThreshold = value;
+    if (extractFloatValue(payload, "ppgHighpassHz", &value)) params.ppgHighpassHz = value;
+    if (extractFloatValue(payload, "ppgLowpassHz", &value)) params.ppgLowpassHz = value;
+    if (extractFloatValue(payload, "nlmsTaps", &value)) params.nlmsTaps = static_cast<uint8_t>(value);
+    if (extractFloatValue(payload, "nlmsStep", &value)) params.nlmsStep = value;
+    if (extractFloatValue(payload, "nlmsEpsilon", &value)) params.nlmsEpsilon = value;
+    if (extractFloatValue(payload, "motionThreshold", &value)) params.motionThreshold = value;
+    signal_dsp::updateParams(params);
+    data_logger::logStatus("[NET] DSP params updated.");
     return;
   }
   if (textContains(payload, "set_payload_mode") || textContains(payload, "set_sample_rates")) {
@@ -517,6 +595,7 @@ void publishDiagTelemetry() {
   const uint32_t qEcg = (g_ecgMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_ecgMqttQueue));
   const uint32_t qPpg = (g_ppgMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_ppgMqttQueue));
   const uint32_t qImu = (g_imuMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_imuMqttQueue));
+  const signal_dsp::DspMetrics dsp = signal_dsp::metrics();
 
   char payload[kMqttPayloadBuffer];
   snprintf(payload, sizeof(payload),
@@ -525,6 +604,7 @@ void publishDiagTelemetry() {
            "\"ecgDropCount\":%lu,\"ppgDropCount\":%lu,\"imuDropCount\":%lu,"
            "\"mqttPublishFailCount\":%lu,\"wifiReconnectCount\":%lu,"
            "\"rssi\":%ld,\"heapFree\":%lu,\"lastPublishLatencyMs\":%lu,"
+           "\"dsp\":{\"enabled\":%s,\"version\":%lu,\"motion\":%.3f,\"ecgQuality\":%.3f,\"ppgQuality\":%.3f,\"ecgBpm\":%.2f,\"ppgBpm\":%.2f},"
            "\"ow\":{\"ecg\":%lu,\"ppg\":%lu,\"imu\":%lu}}",
            MQTT_TOPIC_DEVICE_ID,
            g_clientId,
@@ -542,6 +622,13 @@ void publishDiagTelemetry() {
            static_cast<long>(WiFi.RSSI()),
            static_cast<unsigned long>(ESP.getFreeHeap()),
            static_cast<unsigned long>(g_lastPublishLatencyMs),
+           dsp.enabled ? "true" : "false",
+           static_cast<unsigned long>(dsp.paramsVersion),
+           static_cast<double>(dsp.motionLevel),
+           static_cast<double>(dsp.ecgQuality),
+           static_cast<double>(dsp.ppgQuality),
+           static_cast<double>(dsp.ecgHeartRateBpm),
+           static_cast<double>(dsp.ppgPulseRateBpm),
            static_cast<unsigned long>(g_overwriteEcg),
            static_cast<unsigned long>(g_overwritePpg),
            static_cast<unsigned long>(g_overwriteImu));
@@ -600,6 +687,25 @@ void publishEcgSamples() {
 
     if (!publishBinaryTracked(g_topicWaveBinEcg, payload, off, false)) {
       data_logger::logStatus("[NET] MQTT ECG BIN publish failed.");
+    }
+
+    uint8_t filteredPayload[kMqttPayloadBuffer] = {};
+    const size_t filteredOffset = beginBio2Frame(filteredPayload, sizeof(filteredPayload), 'F', seq, static_cast<uint16_t>(n), payloadLen);
+    size_t filteredOff = filteredOffset;
+    for (size_t i = 0; i < n; ++i) {
+      if (filteredOff + 12 > sizeof(filteredPayload)) {
+        break;
+      }
+      appendU64Le(&filteredPayload[filteredOff], batch[i].ts_us);
+      filteredOff += 8;
+      appendU16Le(&filteredPayload[filteredOff], batch[i].filtered_adc);
+      filteredOff += 2;
+      filteredPayload[filteredOff++] = batch[i].flags;
+      filteredPayload[filteredOff++] = static_cast<uint8_t>(constrain(batch[i].quality * 100.0f, 0.0f, 100.0f));
+    }
+    finishBio2Frame(filteredPayload, filteredOffset, filteredOff - filteredOffset);
+    if (!publishBinaryTracked(g_topicWaveBinEcgFiltered, filteredPayload, filteredOff, false)) {
+      data_logger::logStatus("[NET] MQTT ECG filtered BIN publish failed.");
     }
   }
 }
@@ -666,6 +772,25 @@ void publishPpgSamples() {
 
     if (!publishBinaryTracked(g_topicWaveBinPpg, payload, off, false)) {
       data_logger::logStatus("[NET] MQTT PPG BIN publish failed.");
+    }
+
+    uint8_t filteredPayload[kMqttPayloadBuffer] = {};
+    const size_t filteredOffset = beginBio2Frame(filteredPayload, sizeof(filteredPayload), 'Q', seq, static_cast<uint16_t>(n), payloadLen);
+    size_t filteredOff = filteredOffset;
+    for (size_t i = 0; i < n; ++i) {
+      if (filteredOff + 16 > sizeof(filteredPayload)) {
+        break;
+      }
+      appendU64Le(&filteredPayload[filteredOff], batch[i].ts_us);
+      filteredOff += 8;
+      appendU32Le(&filteredPayload[filteredOff], batch[i].filtered_ir);
+      filteredOff += 4;
+      appendU32Le(&filteredPayload[filteredOff], batch[i].filtered_red);
+      filteredOff += 4;
+    }
+    finishBio2Frame(filteredPayload, filteredOffset, filteredOff - filteredOffset);
+    if (!publishBinaryTracked(g_topicWaveBinPpgFiltered, filteredPayload, filteredOff, false)) {
+      data_logger::logStatus("[NET] MQTT PPG filtered BIN publish failed.");
     }
   }
 }

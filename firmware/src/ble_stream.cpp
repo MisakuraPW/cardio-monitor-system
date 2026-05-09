@@ -2,11 +2,13 @@
 
 #include <Arduino.h>
 #include <NimBLEDevice.h>
+#include <stdlib.h>
 #include <string>
 #include <string.h>
 
 #include "config.h"
 #include "data_logger.h"
+#include "signal_dsp.h"
 
 namespace {
 
@@ -85,6 +87,46 @@ bool textContains(const char* text, const char* needle) {
   return text != nullptr && needle != nullptr && strstr(text, needle) != nullptr;
 }
 
+bool extractFloatValue(const char* text, const char* key, float* out) {
+  if (text == nullptr || key == nullptr || out == nullptr) {
+    return false;
+  }
+  const char* pos = strstr(text, key);
+  if (pos == nullptr) {
+    return false;
+  }
+  pos = strchr(pos, ':');
+  if (pos == nullptr) {
+    return false;
+  }
+  *out = static_cast<float>(atof(pos + 1));
+  return true;
+}
+
+bool extractBoolValue(const char* text, const char* key, bool* out) {
+  if (text == nullptr || key == nullptr || out == nullptr) {
+    return false;
+  }
+  const char* pos = strstr(text, key);
+  if (pos == nullptr) {
+    return false;
+  }
+  pos = strchr(pos, ':');
+  if (pos == nullptr) {
+    return false;
+  }
+  while (*(++pos) == ' ' || *pos == '"') {}
+  if (strncmp(pos, "true", 4) == 0 || *pos == '1') {
+    *out = true;
+    return true;
+  }
+  if (strncmp(pos, "false", 5) == 0 || *pos == '0') {
+    *out = false;
+    return true;
+  }
+  return false;
+}
+
 void resetCounters() {
   g_dropEcg = 0;
   g_dropPpg = 0;
@@ -113,6 +155,38 @@ void handleControlPayload(const char* payload) {
                   textContains(payload, "\"imu_ax\"") ||
                   textContains(payload, "\"imu_gx\"");
     data_logger::logStatus("[BLE] control set_channels.");
+    return;
+  }
+  if (textContains(payload, "reset_dsp_state")) {
+    signal_dsp::reset();
+    data_logger::logStatus("[BLE] DSP state reset.");
+    return;
+  }
+  if (textContains(payload, "set_dsp_enabled")) {
+    signal_dsp::setEnabled(textContains(payload, "true") || textContains(payload, "\"enabled\":1"));
+    data_logger::logStatus("[BLE] DSP enabled updated.");
+    return;
+  }
+  if (textContains(payload, "set_dsp_params")) {
+    signal_dsp::DspParams params = signal_dsp::params();
+    bool boolValue = false;
+    float value = 0.0f;
+    if (extractBoolValue(payload, "enabled", &boolValue)) params.enabled = boolValue;
+    if (extractBoolValue(payload, "ecgNotchEnabled", &boolValue)) params.ecgNotchEnabled = boolValue;
+    if (extractBoolValue(payload, "ppgNlmsEnabled", &boolValue)) params.ppgNlmsEnabled = boolValue;
+    if (extractFloatValue(payload, "ecgHighpassHz", &value)) params.ecgHighpassHz = value;
+    if (extractFloatValue(payload, "ecgLowpassHz", &value)) params.ecgLowpassHz = value;
+    if (extractFloatValue(payload, "ecgNotchHz", &value)) params.ecgNotchHz = value;
+    if (extractFloatValue(payload, "ecgNotchQ", &value)) params.ecgNotchQ = value;
+    if (extractFloatValue(payload, "ecgPeakThreshold", &value)) params.ecgPeakThreshold = value;
+    if (extractFloatValue(payload, "ppgHighpassHz", &value)) params.ppgHighpassHz = value;
+    if (extractFloatValue(payload, "ppgLowpassHz", &value)) params.ppgLowpassHz = value;
+    if (extractFloatValue(payload, "nlmsTaps", &value)) params.nlmsTaps = static_cast<uint8_t>(value);
+    if (extractFloatValue(payload, "nlmsStep", &value)) params.nlmsStep = value;
+    if (extractFloatValue(payload, "nlmsEpsilon", &value)) params.nlmsEpsilon = value;
+    if (extractFloatValue(payload, "motionThreshold", &value)) params.motionThreshold = value;
+    signal_dsp::updateParams(params);
+    data_logger::logStatus("[BLE] DSP params updated.");
   }
 }
 

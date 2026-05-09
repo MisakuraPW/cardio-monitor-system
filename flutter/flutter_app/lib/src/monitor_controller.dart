@@ -528,7 +528,12 @@ class MonitorController extends ChangeNotifier {
   }
 
   bool _isDefaultVisibleChannel(String key) =>
-      key == 'ecg' || key == 'ppg_ir' || key == 'ppg_red';
+      key == 'ecg' ||
+      key == 'ecg_filtered' ||
+      key == 'ppg_ir' ||
+      key == 'ppg_ir_filtered' ||
+      key == 'ppg_red' ||
+      key == 'ppg_red_filtered';
 
   bool _isImuChannel(String key) => key.startsWith('imu_') || key == 'imu';
 

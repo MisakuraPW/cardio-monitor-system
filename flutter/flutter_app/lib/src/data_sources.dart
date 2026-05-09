@@ -159,6 +159,25 @@ class _Bio1BinaryCodec {
             transport: transport,
           );
           break;
+        case 'F':
+          _decodeEcg(
+            data,
+            seq: seq,
+            sampleCount: sampleCount,
+            sampleSize: sampleSize,
+            deviceId: deviceId,
+            sessionId: sessionId,
+            frames: frames,
+            channels: channels,
+            payloadOffset: headerLength,
+            frameVersion: frameVersion,
+            decodeStatus: decodeStatus,
+            transport: transport,
+            channelKey: 'ecg_filtered',
+            label: 'ECG Filtered',
+            colorHex: '#D94F70',
+          );
+          break;
         case 'P':
           _decodePpg(
             data,
@@ -173,6 +192,26 @@ class _Bio1BinaryCodec {
             frameVersion: frameVersion,
             decodeStatus: decodeStatus,
             transport: transport,
+          );
+          break;
+        case 'Q':
+          _decodePpg(
+            data,
+            seq: seq,
+            sampleCount: sampleCount,
+            sampleSize: sampleSize,
+            deviceId: deviceId,
+            sessionId: sessionId,
+            frames: frames,
+            channels: channels,
+            payloadOffset: headerLength,
+            frameVersion: frameVersion,
+            decodeStatus: decodeStatus,
+            transport: transport,
+            irKey: 'ppg_ir_filtered',
+            redKey: 'ppg_red_filtered',
+            irLabel: 'PPG IR Filtered',
+            redLabel: 'PPG RED Filtered',
           );
           break;
         case 'I':
@@ -218,6 +257,9 @@ class _Bio1BinaryCodec {
     required int frameVersion,
     required String decodeStatus,
     required String transport,
+    String channelKey = 'ecg',
+    String label = 'ECG',
+    String colorHex = '#F25F5C',
   }) {
     final timestampsUs = <int>[];
     final values = <double>[];
@@ -227,18 +269,18 @@ class _Bio1BinaryCodec {
       values.add(data.getUint16(offset + 8, Endian.little).toDouble());
     }
     final sampleRate = _estimateSampleRate(timestampsUs, 500);
-    channels['ecg'] = _channel(
-      key: 'ecg',
-      label: 'ECG',
+    channels[channelKey] = _channel(
+      key: channelKey,
+      label: label,
       unit: 'adc',
-      colorHex: '#F25F5C',
+      colorHex: colorHex,
       sampleRate: sampleRate,
     );
     frames.add(
       _frame(
         deviceId: deviceId,
         sessionId: sessionId,
-        channelKey: 'ecg',
+        channelKey: channelKey,
         seq: seq,
         unit: 'adc',
         sampleRate: sampleRate,
@@ -264,6 +306,10 @@ class _Bio1BinaryCodec {
     required int frameVersion,
     required String decodeStatus,
     required String transport,
+    String irKey = 'ppg_ir',
+    String redKey = 'ppg_red',
+    String irLabel = 'PPG IR',
+    String redLabel = 'PPG RED',
   }) {
     final timestampsUs = <int>[];
     final irValues = <double>[];
@@ -275,16 +321,16 @@ class _Bio1BinaryCodec {
       redValues.add(data.getUint32(offset + 12, Endian.little).toDouble());
     }
     final sampleRate = _estimateSampleRate(timestampsUs, 100);
-    channels['ppg_ir'] = _channel(
-      key: 'ppg_ir',
-      label: 'PPG IR',
+    channels[irKey] = _channel(
+      key: irKey,
+      label: irLabel,
       unit: 'count',
       colorHex: '#247BA0',
       sampleRate: sampleRate,
     );
-    channels['ppg_red'] = _channel(
-      key: 'ppg_red',
-      label: 'PPG RED',
+    channels[redKey] = _channel(
+      key: redKey,
+      label: redLabel,
       unit: 'count',
       colorHex: '#C84C5A',
       sampleRate: sampleRate,
@@ -294,7 +340,7 @@ class _Bio1BinaryCodec {
         _frame(
           deviceId: deviceId,
           sessionId: sessionId,
-          channelKey: 'ppg_ir',
+          channelKey: irKey,
           seq: seq,
           unit: 'count',
           sampleRate: sampleRate,
@@ -309,7 +355,7 @@ class _Bio1BinaryCodec {
         _frame(
           deviceId: deviceId,
           sessionId: sessionId,
-          channelKey: 'ppg_red',
+          channelKey: redKey,
           seq: seq,
           unit: 'count',
           sampleRate: sampleRate,
@@ -447,8 +493,10 @@ class _Bio1BinaryCodec {
   static int? _sampleSizeForType(int typeByte) {
     switch (String.fromCharCode(typeByte)) {
       case 'E':
+      case 'F':
         return 12;
       case 'P':
+      case 'Q':
         return 16;
       case 'I':
         return 20;
@@ -613,6 +661,8 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     if (config.demoMode) {
       client.subscribe('$_baseTopic/waveform_bin/ecg', MqttQos.atMostOnce);
       client.subscribe('$_baseTopic/waveform_bin/ppg', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform_bin/ecg_filtered', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform_bin/ppg_filtered', MqttQos.atMostOnce);
     } else {
       client.subscribe('$_baseTopic/catalog', MqttQos.atLeastOnce);
       client.subscribe('$_baseTopic/waveform/+', MqttQos.atMostOnce);
@@ -628,7 +678,14 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
         const ControlCommand(
           type: 'set_channels',
           payload: <String, dynamic>{
-            'enabledKeys': <String>['ecg', 'ppg_ir', 'ppg_red'],
+            'enabledKeys': <String>[
+              'ecg',
+              'ecg_filtered',
+              'ppg_ir',
+              'ppg_ir_filtered',
+              'ppg_red',
+              'ppg_red_filtered',
+            ],
           },
         ),
       );
@@ -781,7 +838,12 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
   }
 
   bool _isDemoRealtimeChannel(String key) =>
-      key == 'ecg' || key == 'ppg_ir' || key == 'ppg_red';
+      key == 'ecg' ||
+      key == 'ecg_filtered' ||
+      key == 'ppg_ir' ||
+      key == 'ppg_ir_filtered' ||
+      key == 'ppg_red' ||
+      key == 'ppg_red_filtered';
 
   void _mergeBinaryCatalog(List<ChannelDescriptor> incoming) {
     if (incoming.isEmpty) {
