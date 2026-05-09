@@ -34,6 +34,7 @@ class MqttAdapterConfig {
     this.deviceId = 'esp32-bio',
     this.username = '',
     this.password = '',
+    this.demoMode = true,
   });
 
   String host;
@@ -43,6 +44,7 @@ class MqttAdapterConfig {
   String deviceId;
   String username;
   String password;
+  bool demoMode;
 }
 
 class BluetoothAdapterConfig {
@@ -564,7 +566,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     client.keepAlivePeriod = 20;
     client.connectTimeoutPeriod = 2000;
     client.disconnectOnNoResponsePeriod = 6;
-    client.logging(on: true);
+    client.logging(on: false);
     client.websocketProtocols = const <String>['mqtt'];
     client.onConnected = () {
       _emitStatus(AdapterState.connected, 'MQTT 连接已建立');
@@ -608,14 +610,29 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
 
     _client = client;
     client.subscribe('$_baseTopic/status', MqttQos.atLeastOnce);
-    client.subscribe('$_baseTopic/catalog', MqttQos.atLeastOnce);
-    client.subscribe('$_baseTopic/waveform/+', MqttQos.atMostOnce);
-    client.subscribe('$_baseTopic/waveform_bin/+', MqttQos.atMostOnce);
-    client.subscribe('$_baseTopic/bin/+', MqttQos.atMostOnce);
-    client.subscribe('$_baseTopic/telemetry_bin', MqttQos.atMostOnce);
-    client.subscribe('$_baseTopic/binary', MqttQos.atMostOnce);
+    if (config.demoMode) {
+      client.subscribe('$_baseTopic/waveform_bin/ecg', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform_bin/ppg', MqttQos.atMostOnce);
+    } else {
+      client.subscribe('$_baseTopic/catalog', MqttQos.atLeastOnce);
+      client.subscribe('$_baseTopic/waveform/+', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform_bin/+', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/bin/+', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/telemetry_bin', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/binary', MqttQos.atMostOnce);
+    }
     client.subscribe('$_baseTopic/metrics', MqttQos.atLeastOnce);
     client.subscribe('$_baseTopic/alerts', MqttQos.atLeastOnce);
+    if (config.demoMode) {
+      await sendControl(
+        const ControlCommand(
+          type: 'set_channels',
+          payload: <String, dynamic>{
+            'enabledKeys': <String>['ecg', 'ppg_ir', 'ppg_red'],
+          },
+        ),
+      );
+    }
     client.updates?.listen(_handleUpdates);
 
     _emitStatus(AdapterState.streaming, '正在监听 $_baseTopic/#');
@@ -633,6 +650,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     final enabledKeys = channels
         .where((ChannelDescriptor item) => item.enabled)
         .map((ChannelDescriptor item) => item.key)
+        .where((String key) => !config.demoMode || _isDemoRealtimeChannel(key))
         .toList();
     await sendControl(
       ControlCommand(
@@ -747,6 +765,9 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
 
     _mergeBinaryCatalog(batch.channels);
     for (final SignalFrame frame in batch.frames) {
+      if (config.demoMode && !_isDemoRealtimeChannel(frame.channelKey)) {
+        continue;
+      }
       _frameController.add(frame);
     }
     if (!_hasSeenBinaryPayload) {
@@ -758,6 +779,9 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     }
     return true;
   }
+
+  bool _isDemoRealtimeChannel(String key) =>
+      key == 'ecg' || key == 'ppg_ir' || key == 'ppg_red';
 
   void _mergeBinaryCatalog(List<ChannelDescriptor> incoming) {
     if (incoming.isEmpty) {

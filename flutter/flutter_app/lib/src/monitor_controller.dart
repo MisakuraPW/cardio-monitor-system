@@ -17,7 +17,7 @@ class MonitorController extends ChangeNotifier {
     _fileAdapter = FileReplayAdapter();
     _bluetoothAdapter = BluetoothDataSourceAdapter(bluetoothConfig);
     _bindAdapter(_mqttAdapter);
-    _uiTickTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+    _uiTickTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
       if (!_hasPendingFrameNotify) {
         return;
       }
@@ -71,10 +71,10 @@ class MonitorController extends ChangeNotifier {
   int latestTimestampMs = 0;
   int? _pauseReferenceTimestampMs;
   bool isPaused = false;
-  double secondsPerScreen = 8;
+  double secondsPerScreen = 6;
   double historyOffsetSeconds = 0;
   double gain = 1;
-  double liveDisplayLagSeconds = 5;
+  double liveDisplayLagSeconds = 2;
 
   String cloudBaseUrl = 'http://127.0.0.1:8000';
 
@@ -425,6 +425,12 @@ class MonitorController extends ChangeNotifier {
   }
 
   void _onFrame(SignalFrame frame) {
+    final knownIndex = _channelCatalog.indexWhere(
+      (ChannelDescriptor item) => item.key == frame.channelKey,
+    );
+    if (knownIndex >= 0 && !_channelCatalog[knownIndex].enabled) {
+      return;
+    }
     final frameLatestTimestampMs = _latestFrameTimestampMs(frame);
     latestTimestampMs = latestTimestampMs == 0
         ? frameLatestTimestampMs
@@ -483,7 +489,7 @@ class MonitorController extends ChangeNotifier {
   }
 
   void _setCatalog(List<ChannelDescriptor> channels) {
-    _channelCatalog = List<ChannelDescriptor>.from(channels);
+    _channelCatalog = channels.map(_withDemoDefaults).toList(growable: false);
     _lastCatalogSignature = _catalogSignature(_channelCatalog);
     for (final ChannelDescriptor item in _channelCatalog) {
       _buffers.putIfAbsent(item.key, () => WaveformBuffer(channelKey: item.key));
@@ -506,10 +512,25 @@ class MonitorController extends ChangeNotifier {
       unit: frame.unit,
       sampleRate: frame.sampleRate,
       colorHex: '#247BA0',
-      enabled: true,
+      enabled: _isDefaultVisibleChannel(frame.channelKey),
     );
     _setCatalog(<ChannelDescriptor>[..._channelCatalog, inferred]);
   }
+
+  ChannelDescriptor _withDemoDefaults(ChannelDescriptor channel) {
+    if (_isDefaultVisibleChannel(channel.key)) {
+      return channel.enabled ? channel : channel.copyWith(enabled: true);
+    }
+    if (_isImuChannel(channel.key) && channel.enabled) {
+      return channel.copyWith(enabled: false);
+    }
+    return channel;
+  }
+
+  bool _isDefaultVisibleChannel(String key) =>
+      key == 'ecg' || key == 'ppg_ir' || key == 'ppg_red';
+
+  bool _isImuChannel(String key) => key.startsWith('imu_') || key == 'imu';
 
   String _catalogSignature(List<ChannelDescriptor> channels) {
     final stable = List<ChannelDescriptor>.from(channels)
@@ -724,7 +745,7 @@ class MonitorController extends ChangeNotifier {
     if (_notifyTimer?.isActive ?? false) {
       return;
     }
-    _notifyTimer = Timer(const Duration(milliseconds: 24), notifyListeners);
+    _notifyTimer = Timer(const Duration(milliseconds: 100), notifyListeners);
   }
 
   void _markFrameDirty() {

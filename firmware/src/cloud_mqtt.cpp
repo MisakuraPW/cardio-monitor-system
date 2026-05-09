@@ -26,9 +26,10 @@ uint32_t g_lastMqttRetryMs = 0;
 uint32_t g_lastDiagPublishMs = 0;
 bool g_wifiConnectInProgress = false;
 uint32_t g_wifiConnectStartMs = 0;
+constexpr bool kDemoWifiMode = true;
 bool g_enableEcg = true;
 bool g_enablePpg = true;
-bool g_enableImu = true;
+bool g_enableImu = !kDemoWifiMode;
 
 uint32_t g_dropEcg = 0;
 uint32_t g_dropPpg = 0;
@@ -670,6 +671,9 @@ void publishPpgSamples() {
 }
 
 void publishImuSamples() {
+  if (kDemoWifiMode) {
+    return;
+  }
   if (g_imuMqttQueue == nullptr) {
     return;
   }
@@ -851,6 +855,9 @@ bool enqueuePpg(const PpgSample& sample) {
 }
 
 bool enqueueImu(const ImuSample& sample) {
+  if (kDemoWifiMode) {
+    return true;
+  }
   if (!g_enableImu) {
     return true;
   }

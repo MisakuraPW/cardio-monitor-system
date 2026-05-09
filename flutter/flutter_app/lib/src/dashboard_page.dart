@@ -618,6 +618,7 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Widget _buildWaveformArea(BuildContext context) {
+    final visibleChannels = _controller.visibleChannels;
     return Column(
       children: <Widget>[
         Card(
@@ -633,7 +634,7 @@ class _DashboardPageState extends State<DashboardPage> {
         ),
         const SizedBox(height: 16),
         Expanded(
-          child: _controller.visibleChannels.isEmpty
+          child: visibleChannels.isEmpty
               ? Card(
                   child: Center(
                     child: Text(
@@ -644,13 +645,13 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                 )
               : ListView.separated(
-                  itemCount: _controller.visibleChannels.length + (_controller.report != null ? 1 : 0),
+                  itemCount: visibleChannels.length + (_controller.report != null ? 1 : 0),
                   separatorBuilder: (_, __) => const SizedBox(height: 16),
                   itemBuilder: (BuildContext context, int index) {
-                    if (_controller.report != null && index == _controller.visibleChannels.length) {
+                    if (_controller.report != null && index == visibleChannels.length) {
                       return _ReportCard(report: _controller.report!);
                     }
-                    final channel = _controller.visibleChannels[index];
+                    final channel = visibleChannels[index];
                     final waveform = _controller.visibleWaveform(channel.key);
                     return _WaveformCard(
                       channel: channel,
@@ -799,6 +800,7 @@ class _WaveformCard extends StatefulWidget {
 class _WaveformCardState extends State<_WaveformCard> {
   HoverSampleInfo? _hoverInfo;
   _WaveformViewport? _stableViewport;
+  int _lastHoverUpdateMs = 0;
 
   @override
   void didUpdateWidget(covariant _WaveformCard oldWidget) {
@@ -865,7 +867,16 @@ class _WaveformCardState extends State<_WaveformCard> {
                       }
                     },
                     onHover: (event) {
-                      final nextHover = _resolveHover(localPosition: event.localPosition, width: width, height: height);
+                      final nowMs = DateTime.now().millisecondsSinceEpoch;
+                      if (nowMs - _lastHoverUpdateMs < 120) {
+                        return;
+                      }
+                      _lastHoverUpdateMs = nowMs;
+                      final nextHover = _resolveHover(
+                        localPosition: event.localPosition,
+                        width: width,
+                        height: height,
+                      );
                       if (_hoverEquals(_hoverInfo, nextHover)) {
                         return;
                       }
