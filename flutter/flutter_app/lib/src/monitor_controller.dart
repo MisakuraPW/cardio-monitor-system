@@ -16,6 +16,12 @@ class MonitorController extends ChangeNotifier {
     _mqttAdapter = MqttDataSourceAdapter(mqttConfig);
     _fileAdapter = FileReplayAdapter();
     _bluetoothAdapter = BluetoothDataSourceAdapter(bluetoothConfig);
+    _segmentUploader = AutoSegmentUploader(
+      onUpload: _uploadSegmentPayload,
+      onUploaded: _onSegmentUploaded,
+      onFailed: _onSegmentUploadFailed,
+      buildMetrics: _buildSegmentMetrics,
+    );
     _bindAdapter(_mqttAdapter);
     _uiTickTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
       if (!_hasPendingFrameNotify) {
@@ -35,6 +41,7 @@ class MonitorController extends ChangeNotifier {
   late final MqttDataSourceAdapter _mqttAdapter;
   late final FileReplayAdapter _fileAdapter;
   late final BluetoothDataSourceAdapter _bluetoothAdapter;
+  late final AutoSegmentUploader _segmentUploader;
 
   DataSourceMode mode = DataSourceMode.wifi;
   DataSourceAdapter? _currentAdapter;
@@ -77,6 +84,12 @@ class MonitorController extends ChangeNotifier {
   double liveDisplayLagSeconds = 2;
 
   String cloudBaseUrl = 'http://127.0.0.1:8000';
+  String userName = '演示用户';
+  bool autoSegmentUploadEnabled = true;
+  int uploadedSegmentCount = 0;
+  int pendingSegmentUploadCount = 0;
+  int failedSegmentUploadCount = 0;
+  SegmentRecord? latestSegment;
 
   List<String> get events => List<String>.unmodifiable(_events);
   List<ChannelDescriptor> get channelCatalog =>
@@ -177,6 +190,11 @@ class MonitorController extends ChangeNotifier {
     _scheduleNotify();
   }
 
+  void updateUserName(String value) {
+    userName = value.trim().isEmpty ? '演示用户' : value.trim();
+    _scheduleNotify();
+  }
+
   Future<void> pickReplayFile() async {
     await _fileAdapter.pickFile();
     if (_fileAdapter.parsedChannels.isNotEmpty) {
@@ -223,10 +241,23 @@ class MonitorController extends ChangeNotifier {
       sourceMode: mode.name,
       startedAt: DateTime.now().toUtc().toIso8601String(),
       channelKeys: _channelCatalog.map((ChannelDescriptor item) => item.key).toList(),
+      userName: userName,
+      metadata: <String, dynamic>{
+        'autoSegmentUpload': autoSegmentUploadEnabled,
+        'segmentDurationSeconds': AutoSegmentUploader.segmentDurationSeconds,
+      },
     );
 
     _pushEvent('开始新的监测会话 ${session!.id}');
     _scheduleNotify();
+    _segmentUploader.reset();
+    uploadedSegmentCount = 0;
+    pendingSegmentUploadCount = 0;
+    failedSegmentUploadCount = 0;
+    latestSegment = null;
+    if (autoSegmentUploadEnabled) {
+      await _openCloudSessionForAutoUpload();
+    }
     await adapter.connect();
   }
 
@@ -236,6 +267,7 @@ class MonitorController extends ChangeNotifier {
     _pauseReferenceTimestampMs = null;
     _pausedSnapshots = <String, WaveformBufferSnapshot>{};
     await _currentAdapter?.disconnect();
+    await _segmentUploader.flush();
     _scheduleNotify();
   }
 
@@ -365,7 +397,9 @@ class MonitorController extends ChangeNotifier {
       cloudApi.baseUrl = cloudBaseUrl;
       _pushEvent('开始上传监测摘要到云端');
 
-      final cloudSession = await cloudApi.createSession(localSession);
+      final cloudSession = localSession.id.startsWith('session-')
+          ? localSession
+          : await cloudApi.createSession(localSession);
       session = cloudSession;
 
       final summary = _buildSummaryPayload();
@@ -453,12 +487,87 @@ class MonitorController extends ChangeNotifier {
           latestSampleTimestampMs: frameLatestTimestampMs,
           receivedAtMs: DateTime.now().millisecondsSinceEpoch,
         );
+    _segmentUploader.observeFrame(frame);
     _markFrameDirty();
   }
 
   void _onTransportStats(TransportStats stats) {
     _transportStats[stats.source] = stats;
     _scheduleNotify();
+  }
+
+  Future<void> _openCloudSessionForAutoUpload() async {
+    final localSession = session;
+    if (localSession == null) {
+      return;
+    }
+    try {
+      cloudApi.baseUrl = cloudBaseUrl;
+      final cloudSession = await cloudApi.createSession(localSession);
+      session = cloudSession;
+      _segmentUploader.start(cloudSession);
+      _pushEvent('自动分段上传已开启: ${cloudSession.userName}');
+    } catch (error) {
+      _segmentUploader.reset();
+      _pushEvent('自动分段上传暂未开启: $error');
+    }
+  }
+
+  Future<SegmentRecord> _uploadSegmentPayload(SegmentUploadPayload payload) {
+    cloudApi.baseUrl = cloudBaseUrl;
+    pendingSegmentUploadCount = _segmentUploader.pendingCount;
+    _scheduleNotify();
+    return cloudApi.uploadSegment(payload);
+  }
+
+  void _onSegmentUploaded(SegmentRecord segment) {
+    latestSegment = segment;
+    uploadedSegmentCount += 1;
+    pendingSegmentUploadCount = _segmentUploader.pendingCount;
+    _trimBuffersBefore(segment.endTimestampMs - 30000);
+    _pushEvent('自动上传分段 #${segment.segmentIndex} 完成，样本 ${segment.sampleCount}');
+    _scheduleNotify();
+  }
+
+  void _onSegmentUploadFailed(Object error) {
+    failedSegmentUploadCount += 1;
+    pendingSegmentUploadCount = _segmentUploader.pendingCount;
+    _pushEvent('自动分段上传失败: $error');
+    _scheduleNotify();
+  }
+
+  Map<String, dynamic> _buildSegmentMetrics() {
+    final snapshot = localAnalysis;
+    return <String, dynamic>{
+      'durationSeconds': snapshot.durationSeconds,
+      'meanQuality': snapshot.meanQuality,
+      'activeChannels': snapshot.activeChannels,
+      'uploadedSegmentCount': uploadedSegmentCount,
+      'transportStats': transportStats.map((TransportStats item) => item.metadata).toList(),
+      'localAnalysis': <String, dynamic>{
+        'findings': snapshot.findings,
+        'channels': snapshot.channels
+            .map(
+              (LocalChannelAnalysis item) => <String, dynamic>{
+                'channelKey': item.channelKey,
+                'sampleCount': item.sampleCount,
+                'durationSeconds': item.durationSeconds,
+                'meanQuality': item.meanQuality,
+                'estimatedRateBpm': item.estimatedRateBpm,
+              },
+            )
+            .toList(),
+      },
+    };
+  }
+
+  void _trimBuffersBefore(int timestampMs) {
+    if (timestampMs <= 0 || isPaused) {
+      return;
+    }
+    for (final WaveformBuffer buffer in _buffers.values) {
+      buffer.trimBefore(timestampMs);
+    }
   }
 
   Map<String, WaveformBufferSnapshot> _buildPauseSnapshots() {
@@ -501,6 +610,9 @@ class MonitorController extends ChangeNotifier {
         sourceMode: session!.sourceMode,
         startedAt: session!.startedAt,
         channelKeys: _channelCatalog.map((ChannelDescriptor item) => item.key).toList(),
+        userId: session!.userId,
+        userName: session!.userName,
+        metadata: session!.metadata,
       );
     }
   }
@@ -772,11 +884,263 @@ class MonitorController extends ChangeNotifier {
     _statusSubscription?.cancel();
     _catalogSubscription?.cancel();
     _statsSubscription?.cancel();
+    _segmentUploader.dispose();
     _mqttAdapter.dispose();
     _fileAdapter.dispose();
     _bluetoothAdapter.dispose();
     cloudApi.dispose();
     super.dispose();
+  }
+}
+
+class AutoSegmentUploader {
+  AutoSegmentUploader({
+    required this.onUpload,
+    required this.onUploaded,
+    required this.onFailed,
+    required this.buildMetrics,
+  });
+
+  static const int segmentDurationSeconds = 20;
+  static const int _segmentDurationMs = segmentDurationSeconds * 1000;
+  static const int _maxPendingSegments = 3;
+
+  final Future<SegmentRecord> Function(SegmentUploadPayload payload) onUpload;
+  final void Function(SegmentRecord segment) onUploaded;
+  final void Function(Object error) onFailed;
+  final Map<String, dynamic> Function() buildMetrics;
+
+  final Map<int, _SegmentAccumulator> _segments = <int, _SegmentAccumulator>{};
+  final List<SegmentUploadPayload> _queue = <SegmentUploadPayload>[];
+  SessionRecord? _session;
+  bool _isUploading = false;
+  int? _baseTimestampMs;
+
+  int get pendingCount => _queue.length + (_isUploading ? 1 : 0);
+
+  void start(SessionRecord session) {
+    _session = session;
+  }
+
+  void reset() {
+    _segments.clear();
+    _queue.clear();
+    _session = null;
+    _baseTimestampMs = null;
+    _isUploading = false;
+  }
+
+  void observeFrame(SignalFrame frame) {
+    final session = _session;
+    if (session == null || frame.samples.isEmpty) {
+      return;
+    }
+    _baseTimestampMs ??= frame.timestampMs;
+    final base = _baseTimestampMs!;
+    final stepMs = frame.sampleRate <= 0 ? 1 : (1000 / frame.sampleRate).round();
+    final timestamps = frame.sampleTimestampsMs;
+    var latestSegmentIndex = 0;
+
+    for (var index = 0; index < frame.samples.length; index++) {
+      final timestampMs = timestamps != null && index < timestamps.length
+          ? timestamps[index]
+          : frame.timestampMs + stepMs * index;
+      final segmentIndex = math.max(0, (timestampMs - base) ~/ _segmentDurationMs);
+      latestSegmentIndex = math.max(latestSegmentIndex, segmentIndex);
+      final segmentStart = base + segmentIndex * _segmentDurationMs;
+      final segmentEnd = segmentStart + _segmentDurationMs - 1;
+      final accumulator = _segments.putIfAbsent(
+        segmentIndex,
+        () => _SegmentAccumulator(
+          segmentIndex: segmentIndex,
+          startTimestampMs: segmentStart,
+          endTimestampMs: segmentEnd,
+        ),
+      );
+      accumulator.addSample(frame, timestampMs, frame.samples[index]);
+    }
+
+    final readyIndexes = _segments.keys
+        .where((int item) => item < latestSegmentIndex)
+        .toList()
+      ..sort();
+    for (final int index in readyIndexes) {
+      _sealSegment(index, session);
+    }
+    unawaited(_pumpUploads());
+  }
+
+  Future<void> flush() async {
+    final session = _session;
+    if (session != null) {
+      final indexes = _segments.keys.toList()..sort();
+      for (final int index in indexes) {
+        _sealSegment(index, session);
+      }
+    }
+    await _pumpUploads();
+  }
+
+  void dispose() {
+    reset();
+  }
+
+  void _sealSegment(int index, SessionRecord session) {
+    final accumulator = _segments.remove(index);
+    if (accumulator == null || accumulator.isEmpty) {
+      return;
+    }
+    final payload = accumulator.toPayload(
+      session: session,
+      metrics: buildMetrics(),
+    );
+    _queue.add(payload);
+    while (_queue.length > _maxPendingSegments) {
+      _queue.removeAt(0);
+      onFailed('待上传分段超过 $_maxPendingSegments 段，已丢弃最旧分段');
+    }
+  }
+
+  Future<void> _pumpUploads() async {
+    if (_isUploading) {
+      return;
+    }
+    _isUploading = true;
+    try {
+      while (_queue.isNotEmpty) {
+        final payload = _queue.removeAt(0);
+        try {
+          final record = await onUpload(payload);
+          onUploaded(record);
+        } catch (error) {
+          onFailed(error);
+          _queue.insert(0, payload);
+          while (_queue.length > _maxPendingSegments) {
+            _queue.removeLast();
+          }
+          break;
+        }
+      }
+    } finally {
+      _isUploading = false;
+    }
+  }
+}
+
+class _SegmentAccumulator {
+  _SegmentAccumulator({
+    required this.segmentIndex,
+    required this.startTimestampMs,
+    required this.endTimestampMs,
+  });
+
+  final int segmentIndex;
+  final int startTimestampMs;
+  final int endTimestampMs;
+  final Map<String, _SegmentChannelAccumulator> channels =
+      <String, _SegmentChannelAccumulator>{};
+
+  bool get isEmpty => channels.values.every((_SegmentChannelAccumulator item) => item.samples.isEmpty);
+
+  void addSample(SignalFrame frame, int timestampMs, double value) {
+    channels
+        .putIfAbsent(
+          frame.channelKey,
+          () => _SegmentChannelAccumulator(
+            channelKey: frame.channelKey,
+            sampleRate: frame.sampleRate,
+            unit: frame.unit,
+          ),
+        )
+        .add(timestampMs, value, frame.quality);
+  }
+
+  SegmentUploadPayload toPayload({
+    required SessionRecord session,
+    required Map<String, dynamic> metrics,
+  }) {
+    final channelUploads = channels.values
+        .where((_SegmentChannelAccumulator item) => item.samples.isNotEmpty)
+        .map((_SegmentChannelAccumulator item) => item.toUpload())
+        .toList(growable: false);
+    return SegmentUploadPayload(
+      sessionId: session.id,
+      deviceId: session.deviceId,
+      userId: session.userId,
+      userName: session.userName,
+      segmentIndex: segmentIndex,
+      startTimestampMs: startTimestampMs,
+      endTimestampMs: endTimestampMs,
+      channels: channelUploads,
+      metrics: metrics,
+      channelSummaries: <String, dynamic>{
+        for (final SegmentChannelUpload item in channelUploads)
+          item.channelKey: item.summary,
+      },
+      metadata: <String, dynamic>{
+        'source': 'flutter_upper_auto_segment',
+        'durationSeconds': AutoSegmentUploader.segmentDurationSeconds,
+      },
+    );
+  }
+}
+
+class _SegmentChannelAccumulator {
+  _SegmentChannelAccumulator({
+    required this.channelKey,
+    required this.sampleRate,
+    required this.unit,
+  });
+
+  final String channelKey;
+  final double sampleRate;
+  final String unit;
+  final List<double> samples = <double>[];
+  int? firstTimestampMs;
+  int? lastTimestampMs;
+  double _qualitySum = 0;
+  double _sum = 0;
+  double _sumSquares = 0;
+  double? _min;
+  double? _max;
+
+  void add(int timestampMs, double value, double quality) {
+    firstTimestampMs ??= timestampMs;
+    lastTimestampMs = timestampMs;
+    samples.add(value);
+    _qualitySum += quality;
+    _sum += value;
+    _sumSquares += value * value;
+    _min = _min == null ? value : math.min(_min!, value);
+    _max = _max == null ? value : math.max(_max!, value);
+  }
+
+  SegmentChannelUpload toUpload() {
+    final count = samples.length;
+    final mean = count == 0 ? 0.0 : _sum / count;
+    final rms = count == 0 ? 0.0 : math.sqrt(_sumSquares / count);
+    final variance = count == 0 ? 0.0 : math.max(0, (_sumSquares / count) - mean * mean);
+    final minValue = _min ?? 0.0;
+    final maxValue = _max ?? 0.0;
+    return SegmentChannelUpload(
+      channelKey: channelKey,
+      sampleRate: sampleRate,
+      unit: unit,
+      quality: count == 0 ? 0 : _qualitySum / count,
+      startTimestampMs: firstTimestampMs ?? 0,
+      endTimestampMs: lastTimestampMs ?? firstTimestampMs ?? 0,
+      samples: List<double>.unmodifiable(samples),
+      summary: <String, dynamic>{
+        'samples': count,
+        'mean': mean,
+        'min': minValue,
+        'max': maxValue,
+        'rms': rms,
+        'stdDev': math.sqrt(variance),
+        'peakToPeak': maxValue - minValue,
+        'meanQuality': count == 0 ? 0 : _qualitySum / count,
+      },
+    );
   }
 }
 
@@ -1298,6 +1662,45 @@ class WaveformBuffer implements WaveformHistoryStore {
       _recomputeRange();
     }
     if (_startIndex >= compactionThreshold) {
+      _compact();
+    }
+  }
+
+  void trimBefore(int timestampMs) {
+    if (!hasPoints || timestampMs <= oldestTimestampMs) {
+      return;
+    }
+    final trimEnd = _lowerBound(timestampMs);
+    if (trimEnd <= _startIndex) {
+      return;
+    }
+    var needsRangeRebuild = false;
+    for (var index = _startIndex; index < trimEnd; index++) {
+      final item = _points[index];
+      _sum -= item.value;
+      _sumSquares -= item.value * item.value;
+      if (item.value == _min || item.value == _max) {
+        needsRangeRebuild = true;
+      }
+    }
+    _startIndex = trimEnd;
+    _summaryDirty = true;
+    if (!hasPoints) {
+      _points.clear();
+      _startIndex = 0;
+      _sum = 0;
+      _sumSquares = 0;
+      _min = 0;
+      _max = 0;
+      _cachedSummary = null;
+      _cachedRateBpm = null;
+      _lastRateEstimateTimestampMs = 0;
+      return;
+    }
+    if (needsRangeRebuild) {
+      _recomputeRange();
+    }
+    if (_startIndex >= 12000) {
       _compact();
     }
   }

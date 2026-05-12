@@ -258,6 +258,9 @@ class SessionRecord {
     required this.sourceMode,
     required this.startedAt,
     required this.channelKeys,
+    this.userId,
+    this.userName = '演示用户',
+    this.metadata = const <String, dynamic>{},
   });
 
   final String id;
@@ -265,6 +268,9 @@ class SessionRecord {
   final String sourceMode;
   final String startedAt;
   final List<String> channelKeys;
+  final String? userId;
+  final String userName;
+  final Map<String, dynamic> metadata;
 
   Map<String, dynamic> toJson() {
     return <String, dynamic>{
@@ -273,6 +279,9 @@ class SessionRecord {
       'sourceMode': sourceMode,
       'startedAt': startedAt,
       'channelKeys': channelKeys,
+      if (userId != null && userId!.isNotEmpty) 'userId': userId,
+      'userName': userName,
+      'metadata': metadata,
     };
   }
 
@@ -286,6 +295,131 @@ class SessionRecord {
       sourceMode: json['sourceMode'] as String,
       startedAt: json['startedAt'] as String,
       channelKeys: keys,
+      userId: json['userId'] as String?,
+      userName: (json['userName'] ?? '演示用户') as String,
+      metadata: (json['metadata'] as Map<String, dynamic>?) ?? const <String, dynamic>{},
+    );
+  }
+}
+
+class SegmentChannelUpload {
+  const SegmentChannelUpload({
+    required this.channelKey,
+    required this.sampleRate,
+    required this.unit,
+    required this.quality,
+    required this.startTimestampMs,
+    required this.endTimestampMs,
+    required this.samples,
+    required this.summary,
+  });
+
+  final String channelKey;
+  final double sampleRate;
+  final String unit;
+  final double quality;
+  final int startTimestampMs;
+  final int endTimestampMs;
+  final List<double> samples;
+  final Map<String, dynamic> summary;
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'channelKey': channelKey,
+      'sampleRate': sampleRate,
+      'unit': unit,
+      'quality': quality,
+      'startTimestampMs': startTimestampMs,
+      'endTimestampMs': endTimestampMs,
+      'samples': samples,
+      'summary': summary,
+    };
+  }
+}
+
+class SegmentUploadPayload {
+  const SegmentUploadPayload({
+    required this.sessionId,
+    required this.deviceId,
+    required this.userId,
+    required this.userName,
+    required this.segmentIndex,
+    required this.startTimestampMs,
+    required this.endTimestampMs,
+    required this.channels,
+    required this.metrics,
+    required this.channelSummaries,
+    required this.metadata,
+  });
+
+  final String sessionId;
+  final String deviceId;
+  final String? userId;
+  final String userName;
+  final int segmentIndex;
+  final int startTimestampMs;
+  final int endTimestampMs;
+  final List<SegmentChannelUpload> channels;
+  final Map<String, dynamic> metrics;
+  final Map<String, dynamic> channelSummaries;
+  final Map<String, dynamic> metadata;
+
+  Map<String, dynamic> toJson() {
+    return <String, dynamic>{
+      'sessionId': sessionId,
+      'deviceId': deviceId,
+      if (userId != null && userId!.isNotEmpty) 'userId': userId,
+      'userName': userName,
+      'segmentIndex': segmentIndex,
+      'startTimestampMs': startTimestampMs,
+      'endTimestampMs': endTimestampMs,
+      'channels': channels.map((SegmentChannelUpload item) => item.toJson()).toList(),
+      'metrics': metrics,
+      'channelSummaries': channelSummaries,
+      'metadata': metadata,
+    };
+  }
+}
+
+class SegmentRecord {
+  const SegmentRecord({
+    required this.id,
+    required this.sessionId,
+    required this.userId,
+    required this.userName,
+    required this.segmentIndex,
+    required this.createdAt,
+    required this.startTimestampMs,
+    required this.endTimestampMs,
+    required this.sampleCount,
+    required this.channelKeys,
+  });
+
+  final String id;
+  final String sessionId;
+  final String userId;
+  final String userName;
+  final int segmentIndex;
+  final String createdAt;
+  final int startTimestampMs;
+  final int endTimestampMs;
+  final int sampleCount;
+  final List<String> channelKeys;
+
+  factory SegmentRecord.fromJson(Map<String, dynamic> json) {
+    return SegmentRecord(
+      id: json['id'] as String,
+      sessionId: json['sessionId'] as String,
+      userId: (json['userId'] ?? '') as String,
+      userName: (json['userName'] ?? '演示用户') as String,
+      segmentIndex: (json['segmentIndex'] as num?)?.toInt() ?? 0,
+      createdAt: (json['createdAt'] ?? '') as String,
+      startTimestampMs: (json['startTimestampMs'] as num?)?.toInt() ?? 0,
+      endTimestampMs: (json['endTimestampMs'] as num?)?.toInt() ?? 0,
+      sampleCount: (json['sampleCount'] as num?)?.toInt() ?? 0,
+      channelKeys: (json['channelKeys'] as List<dynamic>? ?? const <dynamic>[])
+          .map((dynamic item) => item.toString())
+          .toList(),
     );
   }
 }

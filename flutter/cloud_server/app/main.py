@@ -21,11 +21,15 @@ from .models import (
     IngestSessionOpen,
     MedicalReport,
     RawChunkRecord,
+    SegmentDetail,
+    SegmentRecord,
+    SegmentUploadCreate,
     SessionCreate,
     SessionDetail,
     SessionRecord,
     UploadCreate,
     UploadRecord,
+    UserRecord,
 )
 from .storage import SQLiteStorage
 
@@ -107,6 +111,42 @@ def create_upload(session_id: str, payload: UploadCreate) -> UploadRecord:
     if storage.get_session(session_id) is None:
         raise HTTPException(status_code=404, detail='Session not found')
     return storage.create_upload(session_id, payload)
+
+
+@app.post('/api/v1/sessions/{session_id}/segments', response_model=SegmentRecord)
+def create_segment(session_id: str, payload: SegmentUploadCreate) -> SegmentRecord:
+    if storage.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail='Session not found')
+    if payload.sessionId != session_id:
+        raise HTTPException(status_code=400, detail='Segment sessionId does not match path')
+    return storage.create_segment(session_id, payload)
+
+
+@app.get('/api/v1/sessions/{session_id}/segments', response_model=list[SegmentRecord])
+def list_session_segments(session_id: str) -> list[SegmentRecord]:
+    if storage.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail='Session not found')
+    return storage.list_segments(session_id)
+
+
+@app.get('/api/v1/sessions/{session_id}/segments/{segment_id}', response_model=SegmentDetail)
+def get_session_segment(session_id: str, segment_id: str) -> SegmentDetail:
+    if storage.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail='Session not found')
+    try:
+        return storage.get_segment_detail(session_id, segment_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Segment not found') from exc
+
+
+@app.get('/api/v1/users', response_model=list[UserRecord])
+def list_users() -> list[UserRecord]:
+    return storage.list_users()
+
+
+@app.get('/api/v1/users/{user_id}/sessions', response_model=list[SessionRecord])
+def list_user_sessions(user_id: str) -> list[SessionRecord]:
+    return storage.list_sessions_for_user(user_id)
 
 
 @app.post('/api/v1/analysis/jobs', response_model=AnalysisJobRecord)
@@ -196,6 +236,12 @@ def admin_overview(x_admin_token: str | None = Header(default=None)) -> AdminOve
 def admin_sessions(x_admin_token: str | None = Header(default=None)) -> list[AdminSessionItem]:
     _require_admin_token(x_admin_token)
     return storage.list_admin_sessions(limit=100)
+
+
+@app.get('/api/v1/admin/users', response_model=list[UserRecord])
+def admin_users(x_admin_token: str | None = Header(default=None)) -> list[UserRecord]:
+    _require_admin_token(x_admin_token)
+    return storage.list_users()
 
 
 @app.get('/api/v1/admin/sessions/{session_id}', response_model=SessionDetail)

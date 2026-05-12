@@ -30,6 +30,10 @@ class CloudApiService {
           'sourceMode': session.sourceMode,
           'channelKeys': session.channelKeys,
           'startedAt': session.startedAt,
+          if (session.userId != null && session.userId!.isNotEmpty)
+            'userId': session.userId,
+          'userName': session.userName,
+          'metadata': session.metadata,
         },
       ),
     );
@@ -54,6 +58,16 @@ class CloudApiService {
     );
     _ensureOk(response);
     return UploadTask.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<SegmentRecord> uploadSegment(SegmentUploadPayload payload) async {
+    final response = await _client.post(
+      _uri('/api/v1/sessions/${payload.sessionId}/segments'),
+      headers: const <String, String>{'Content-Type': 'application/json'},
+      body: jsonEncode(payload.toJson()),
+    );
+    _ensureOk(response);
+    return SegmentRecord.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   Future<AnalysisJob> createAnalysisJob(String sessionId) async {

@@ -20,11 +20,21 @@ class SessionCreate(BaseModel):
     sourceMode: str
     channelKeys: list[str] = Field(default_factory=list)
     startedAt: str = Field(default_factory=utcnow_iso)
+    userId: str | None = None
+    userName: str = '演示用户'
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class SessionRecord(SessionCreate):
     id: str
     updatedAt: str
+
+
+class UserRecord(BaseModel):
+    userId: str
+    userName: str
+    sessionCount: int = 0
+    latestUpdatedAt: str = ''
 
 
 class UploadCreate(BaseModel):
@@ -149,6 +159,52 @@ class RawChunkRecord(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SegmentChannelPayload(BaseModel):
+    channelKey: str
+    sampleRate: float
+    unit: str = 'a.u.'
+    quality: float = 1.0
+    startTimestampMs: int
+    endTimestampMs: int
+    samples: list[float] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class SegmentUploadCreate(BaseModel):
+    sessionId: str
+    deviceId: str
+    userId: str | None = None
+    userName: str = '演示用户'
+    segmentIndex: int
+    startTimestampMs: int
+    endTimestampMs: int
+    channels: list[SegmentChannelPayload] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    channelSummaries: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SegmentRecord(BaseModel):
+    id: str
+    sessionId: str
+    userId: str
+    userName: str
+    segmentIndex: int
+    objectKey: str
+    createdAt: str
+    startTimestampMs: int
+    endTimestampMs: int
+    sampleCount: int
+    channelKeys: list[str] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    channelSummaries: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SegmentDetail(SegmentRecord):
+    channels: list[SegmentChannelPayload] = Field(default_factory=list)
+
+
 class AlertCreate(BaseModel):
     sessionId: str
     deviceId: str
@@ -170,6 +226,8 @@ class AdminOverview(BaseModel):
     reportCount: int
     rawChunkCount: int
     alertCount: int
+    userCount: int = 0
+    segmentCount: int = 0
     latestSessions: list[SessionRecord] = Field(default_factory=list)
 
 
@@ -179,6 +237,7 @@ class AdminSessionItem(BaseModel):
     latestJob: AnalysisJobRecord | None = None
     hasReport: bool = False
     rawChunkCount: int = 0
+    segmentCount: int = 0
 
 
 class SessionDetail(BaseModel):
@@ -188,4 +247,5 @@ class SessionDetail(BaseModel):
     report: MedicalReport | None = None
     catalogs: list[ChannelCatalogRecord] = Field(default_factory=list)
     rawChunks: list[RawChunkRecord] = Field(default_factory=list)
+    segments: list[SegmentRecord] = Field(default_factory=list)
     alerts: list[AlertRecord] = Field(default_factory=list)

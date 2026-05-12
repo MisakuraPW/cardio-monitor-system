@@ -5,6 +5,16 @@ export type SessionRecord = {
   channelKeys: string[]
   startedAt: string
   updatedAt: string
+  userId?: string | null
+  userName: string
+  metadata: Record<string, unknown>
+}
+
+export type UserRecord = {
+  userId: string
+  userName: string
+  sessionCount: number
+  latestUpdatedAt: string
 }
 
 export type UploadRecord = {
@@ -24,12 +34,45 @@ export type AnalysisJobRecord = {
   summary: string
 }
 
+export type SegmentRecord = {
+  id: string
+  sessionId: string
+  userId: string
+  userName: string
+  segmentIndex: number
+  objectKey: string
+  createdAt: string
+  startTimestampMs: number
+  endTimestampMs: number
+  sampleCount: number
+  channelKeys: string[]
+  metrics: Record<string, unknown>
+  channelSummaries: Record<string, unknown>
+  metadata: Record<string, unknown>
+}
+
+export type SegmentChannelPayload = {
+  channelKey: string
+  sampleRate: number
+  unit: string
+  quality: number
+  startTimestampMs: number
+  endTimestampMs: number
+  samples: number[]
+  summary: Record<string, unknown>
+}
+
+export type SegmentDetail = SegmentRecord & {
+  channels: SegmentChannelPayload[]
+}
+
 export type AdminSessionItem = {
   session: SessionRecord
   latestUpload?: UploadRecord | null
   latestJob?: AnalysisJobRecord | null
   hasReport: boolean
   rawChunkCount: number
+  segmentCount: number
 }
 
 export type DeviceRecord = {
@@ -58,6 +101,8 @@ export type AdminOverview = {
   reportCount: number
   rawChunkCount: number
   alertCount: number
+  userCount: number
+  segmentCount: number
   latestSessions: SessionRecord[]
 }
 
@@ -71,5 +116,6 @@ export type SessionDetail = {
     recommendations: string[]
   } | null
   rawChunks: Array<{ id: string; channelKey: string; sourceType: string; sampleCount: number; objectKey: string }>
+  segments: SegmentRecord[]
   alerts: AlertRecord[]
 }

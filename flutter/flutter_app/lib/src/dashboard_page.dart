@@ -23,6 +23,7 @@ class _DashboardPageState extends State<DashboardPage> {
   late final TextEditingController _usernameController;
   late final TextEditingController _passwordController;
   late final TextEditingController _cloudController;
+  late final TextEditingController _userNameController;
   late final TextEditingController _bleNamePrefixController;
   late final TextEditingController _bleServiceController;
   late final TextEditingController _bleNotifyController;
@@ -41,6 +42,7 @@ class _DashboardPageState extends State<DashboardPage> {
     _usernameController = TextEditingController(text: _controller.mqttConfig.username);
     _passwordController = TextEditingController(text: _controller.mqttConfig.password);
     _cloudController = TextEditingController(text: _controller.cloudBaseUrl);
+    _userNameController = TextEditingController(text: _controller.userName);
     _bleNamePrefixController = TextEditingController(text: _controller.bluetoothConfig.deviceNamePrefix);
     _bleServiceController = TextEditingController(text: _controller.bluetoothConfig.serviceUuid);
     _bleNotifyController = TextEditingController(text: _controller.bluetoothConfig.notifyCharacteristicUuid);
@@ -56,6 +58,7 @@ class _DashboardPageState extends State<DashboardPage> {
     _usernameController.dispose();
     _passwordController.dispose();
     _cloudController.dispose();
+    _userNameController.dispose();
     _bleNamePrefixController.dispose();
     _bleServiceController.dispose();
     _bleNotifyController.dispose();
@@ -191,6 +194,10 @@ class _DashboardPageState extends State<DashboardPage> {
               }).toList(),
             ),
             const SizedBox(height: 16),
+            _buildTextField('用户姓名 / 编号', _userNameController, (String value) {
+              _controller.updateUserName(value);
+            }),
+            const SizedBox(height: 12),
             if (_controller.mode == DataSourceMode.wifi) ...<Widget>[
               _buildTextField('Broker Host', _hostController, (String value) {
                 _controller.updateMqttConfig(host: value);
@@ -273,6 +280,15 @@ class _DashboardPageState extends State<DashboardPage> {
               const Text('蓝牙模式基于 Web Bluetooth，默认按 esp32-bio 设备名前缀筛选，并按 BIO1 二进制帧解析 Notify 数据。页面仍需运行在 Chrome / Edge 的 HTTPS 或 localhost 环境下。'),
             ],
             const SizedBox(height: 16),
+            Text(
+              '自动分段: 每 20 秒上传一次，已上传 ${_controller.uploadedSegmentCount} 段，待上传 ${_controller.pendingSegmentUploadCount} 段，失败 ${_controller.failedSegmentUploadCount} 段。',
+            ),
+            if (_controller.latestSegment != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text('最近分段: #${_controller.latestSegment!.segmentIndex} / ${_controller.latestSegment!.sampleCount} 点'),
+              ),
+            const SizedBox(height: 12),
             Row(
               children: <Widget>[
                 Expanded(
@@ -695,6 +711,8 @@ class _DashboardPageState extends State<DashboardPage> {
       username: _usernameController.text.trim(),
       password: _passwordController.text,
     );
+    _controller.updateCloudBaseUrl(_cloudController.text.trim());
+    _controller.updateUserName(_userNameController.text.trim());
   }
 }
 class _StatusBadge extends StatelessWidget {
