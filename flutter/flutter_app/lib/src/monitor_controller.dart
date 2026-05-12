@@ -436,6 +436,28 @@ class MonitorController extends ChangeNotifier {
     _scheduleNotify();
   }
 
+  Future<void> analyzeLatestSegment() async {
+    final localSession = session;
+    final segment = latestSegment;
+    if (localSession == null || segment == null) {
+      _pushEvent('暂无可分析的自动分段');
+      _scheduleNotify();
+      return;
+    }
+    try {
+      cloudApi.baseUrl = cloudBaseUrl;
+      _pushEvent('开始分析最近分段 #${segment.segmentIndex}');
+      report = await cloudApi.analyzeSegment(
+        sessionId: localSession.id,
+        segmentId: segment.id,
+      );
+      _pushEvent('最近分段报告已回传');
+    } catch (error) {
+      _pushEvent('分段分析失败: $error');
+    }
+    _scheduleNotify();
+  }
+
   void _bindAdapter(DataSourceAdapter adapter) {
     _frameSubscription?.cancel();
     _statusSubscription?.cancel();
@@ -903,7 +925,9 @@ class AutoSegmentUploader {
 
   static const int segmentDurationSeconds = 20;
   static const int _segmentDurationMs = segmentDurationSeconds * 1000;
+  static const int _segmentCloseGraceMs = 2500;
   static const int _maxPendingSegments = 3;
+  static const int _minAutoUploadSamples = 100;
 
   final Future<SegmentRecord> Function(SegmentUploadPayload payload) onUpload;
   final void Function(SegmentRecord segment) onUploaded;
@@ -911,10 +935,12 @@ class AutoSegmentUploader {
   final Map<String, dynamic> Function() buildMetrics;
 
   final Map<int, _SegmentAccumulator> _segments = <int, _SegmentAccumulator>{};
+  final Set<int> _closedSegmentIndexes = <int>{};
   final List<SegmentUploadPayload> _queue = <SegmentUploadPayload>[];
   SessionRecord? _session;
   bool _isUploading = false;
   int? _baseTimestampMs;
+  int _maxObservedTimestampMs = 0;
 
   int get pendingCount => _queue.length + (_isUploading ? 1 : 0);
 
@@ -924,9 +950,11 @@ class AutoSegmentUploader {
 
   void reset() {
     _segments.clear();
+    _closedSegmentIndexes.clear();
     _queue.clear();
     _session = null;
     _baseTimestampMs = null;
+    _maxObservedTimestampMs = 0;
     _isUploading = false;
   }
 
@@ -939,14 +967,16 @@ class AutoSegmentUploader {
     final base = _baseTimestampMs!;
     final stepMs = frame.sampleRate <= 0 ? 1 : (1000 / frame.sampleRate).round();
     final timestamps = frame.sampleTimestampsMs;
-    var latestSegmentIndex = 0;
 
     for (var index = 0; index < frame.samples.length; index++) {
       final timestampMs = timestamps != null && index < timestamps.length
           ? timestamps[index]
           : frame.timestampMs + stepMs * index;
       final segmentIndex = math.max(0, (timestampMs - base) ~/ _segmentDurationMs);
-      latestSegmentIndex = math.max(latestSegmentIndex, segmentIndex);
+      if (_closedSegmentIndexes.contains(segmentIndex)) {
+        continue;
+      }
+      _maxObservedTimestampMs = math.max(_maxObservedTimestampMs, timestampMs);
       final segmentStart = base + segmentIndex * _segmentDurationMs;
       final segmentEnd = segmentStart + _segmentDurationMs - 1;
       final accumulator = _segments.putIfAbsent(
@@ -960,8 +990,10 @@ class AutoSegmentUploader {
       accumulator.addSample(frame, timestampMs, frame.samples[index]);
     }
 
-    final readyIndexes = _segments.keys
-        .where((int item) => item < latestSegmentIndex)
+    final closeBeforeMs = _maxObservedTimestampMs - _segmentCloseGraceMs;
+    final readyIndexes = _segments.entries
+        .where((MapEntry<int, _SegmentAccumulator> item) => item.value.endTimestampMs <= closeBeforeMs)
+        .map((MapEntry<int, _SegmentAccumulator> item) => item.key)
         .toList()
       ..sort();
     for (final int index in readyIndexes) {
@@ -986,8 +1018,15 @@ class AutoSegmentUploader {
   }
 
   void _sealSegment(int index, SessionRecord session) {
+    if (!_closedSegmentIndexes.add(index)) {
+      _segments.remove(index);
+      return;
+    }
     final accumulator = _segments.remove(index);
     if (accumulator == null || accumulator.isEmpty) {
+      return;
+    }
+    if (accumulator.sampleCount < _minAutoUploadSamples) {
       return;
     }
     final payload = accumulator.toPayload(
@@ -1041,6 +1080,10 @@ class _SegmentAccumulator {
       <String, _SegmentChannelAccumulator>{};
 
   bool get isEmpty => channels.values.every((_SegmentChannelAccumulator item) => item.samples.isEmpty);
+  int get sampleCount => channels.values.fold<int>(
+        0,
+        (int total, _SegmentChannelAccumulator item) => total + item.samples.length,
+      );
 
   void addSample(SignalFrame frame, int timestampMs, double value) {
     channels

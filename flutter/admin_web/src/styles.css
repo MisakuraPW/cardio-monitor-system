@@ -133,6 +133,31 @@ button {
   cursor: pointer;
 }
 
+.segment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 10px 0 14px;
+}
+
+.segment-actions a,
+.segment-actions button {
+  display: inline-flex;
+  align-items: center;
+  padding: 9px 12px;
+  border: 1px solid #cfe0d5;
+  border-radius: 10px;
+  background: #edf8f0;
+  color: #123524;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.segment-actions button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
 .waveform-preview {
   margin-top: 14px;
   padding: 12px;

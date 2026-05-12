@@ -374,12 +374,36 @@ function SegmentPanel({
 }
 
 function SegmentPlayback({ segment }: { segment: SegmentDetail }) {
+  const [reportSummary, setReportSummary] = useState<string>('')
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
   const channels = segment.channels.filter((item) => playbackChannels.has(item.channelKey))
+  const csvUrl = api.getSegmentCsvUrl(segment.sessionId, segment.id)
+
+  async function analyzeSegment() {
+    setIsAnalyzing(true)
+    setReportSummary('')
+    try {
+      const result = await api.analyzeSegment(segment.sessionId, segment.id)
+      setReportSummary(result.report.summary)
+    } catch (err) {
+      setReportSummary(err instanceof Error ? err.message : '分析失败')
+    } finally {
+      setIsAnalyzing(false)
+    }
+  }
+
   return (
     <div>
       <p>
         当前分段 #{segment.segmentIndex}，时间 {segment.startTimestampMs} - {segment.endTimestampMs}，通道 {channels.length} 个。
       </p>
+      <div className="segment-actions">
+        <a href={csvUrl} target="_blank" rel="noreferrer">下载 CSV</a>
+        <button onClick={() => void analyzeSegment()} disabled={isAnalyzing}>
+          {isAnalyzing ? '分析中...' : '调用大模型/规则分析'}
+        </button>
+      </div>
+      {reportSummary ? <p className="notice">{reportSummary}</p> : null}
       {channels.map((channel) => (
         <div key={channel.channelKey} className="waveform-preview">
           <div className="waveform-title">

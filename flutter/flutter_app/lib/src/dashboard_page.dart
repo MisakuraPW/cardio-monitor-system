@@ -535,6 +535,16 @@ class _DashboardPageState extends State<DashboardPage> {
               Text('上传任务: ${_controller.uploadTask!.id}'),
               Text('状态: ${_controller.uploadTask!.status}'),
             ],
+            if (_controller.latestSegment != null) ...<Widget>[
+              const SizedBox(height: 12),
+              Text('最近自动分段: #${_controller.latestSegment!.segmentIndex} / ${_controller.latestSegment!.sampleCount} 点'),
+              const SizedBox(height: 8),
+              FilledButton.tonalIcon(
+                onPressed: _controller.analyzeLatestSegment,
+                icon: const Icon(Icons.psychology_alt_outlined),
+                label: const Text('分析最近分段'),
+              ),
+            ],
             if (_controller.analysisJob != null) ...<Widget>[
               const SizedBox(height: 12),
               Text('分析任务: ${_controller.analysisJob!.id}'),
