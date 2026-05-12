@@ -63,6 +63,42 @@ def process_pending_jobs(storage: SQLiteStorage, settings: Settings, limit: int 
     return processed
 
 
+def process_segment_analysis(
+    storage: SQLiteStorage,
+    settings: Settings,
+    session_id: str,
+    segment_id: str,
+) -> MedicalReport:
+    session = storage.get_session(session_id)
+    if session is None:
+        raise KeyError(session_id)
+    segment = storage.get_segment_detail(session_id, segment_id)
+    summary = _build_segment_summary(segment)
+    excerpts = _build_segment_excerpts(segment)
+    rule_report = build_rule_report(session_id=session.id, summary=summary, excerpts=excerpts)
+    provider = build_analysis_provider(settings)
+    provider_output = provider.analyze(
+        session=session,
+        features=summary,
+        excerpts=excerpts,
+        context={
+            'analysisScope': 'single_segment',
+            'segment': segment.model_dump(exclude={'channels'}),
+            'ruleReport': rule_report.model_dump(),
+        },
+    )
+    report = _merge_reports(
+        rule_report,
+        provider_output.summaryAppendix,
+        provider_output.findings or [],
+        provider_output.recommendations or [],
+        provider_output.confidence,
+        provider_output.modelTrace,
+    )
+    storage.save_segment_report(segment_id, report)
+    return report
+
+
 def build_feature_snapshot(summary: dict[str, Any], excerpts: dict[str, Any]) -> dict[str, Any]:
     channels = summary.get('channels', {}) or {}
     local_analysis = summary.get('localAnalysis', {}) or {}
@@ -73,6 +109,40 @@ def build_feature_snapshot(summary: dict[str, Any], excerpts: dict[str, Any]) ->
         'excerptChannelCount': len(excerpts),
         'localAnalysis': local_analysis,
     }
+
+
+def _build_segment_summary(segment) -> dict[str, Any]:
+    duration_seconds = max(0, segment.endTimestampMs - segment.startTimestampMs) / 1000
+    channels = {
+        key: value
+        for key, value in segment.channelSummaries.items()
+        if isinstance(value, dict)
+    }
+    quality_values = [
+        float(value.get('meanQuality', 0) or 0)
+        for value in channels.values()
+        if isinstance(value, dict)
+    ]
+    return {
+        'durationSeconds': duration_seconds,
+        'qualityScore': sum(quality_values) / len(quality_values) if quality_values else 0,
+        'channels': channels,
+        'mode': 'segment',
+        'segmentIndex': segment.segmentIndex,
+        'metrics': segment.metrics,
+    }
+
+
+def _build_segment_excerpts(segment) -> dict[str, list[float]]:
+    excerpts: dict[str, list[float]] = {}
+    for channel in segment.channels:
+        samples = channel.samples
+        if len(samples) <= 40:
+            excerpts[channel.channelKey] = samples
+            continue
+        step = max(1, len(samples) // 40)
+        excerpts[channel.channelKey] = samples[::step][:40]
+    return excerpts
 
 
 def _merge_reports(

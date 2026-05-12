@@ -92,6 +92,30 @@ class CloudApiService {
     return MedicalReport.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
   }
 
+  Future<MedicalReport> analyzeSegment({
+    required String sessionId,
+    required String segmentId,
+  }) async {
+    final response = await _client.post(
+      _uri('/api/v1/sessions/$sessionId/segments/$segmentId/analyze'),
+      headers: const <String, String>{'Content-Type': 'application/json'},
+    );
+    _ensureOk(response);
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    return MedicalReport.fromJson(decoded['report'] as Map<String, dynamic>);
+  }
+
+  Future<MedicalReport> getSegmentReport({
+    required String sessionId,
+    required String segmentId,
+  }) async {
+    final response = await _client.get(
+      _uri('/api/v1/sessions/$sessionId/segments/$segmentId/report'),
+    );
+    _ensureOk(response);
+    return MedicalReport.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
   void dispose() {
     _client.close();
   }

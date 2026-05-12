@@ -1,10 +1,13 @@
 ﻿from __future__ import annotations
 
+import csv
+from io import StringIO
+
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
-from .analysis_service import process_analysis_job
+from .analysis_service import process_analysis_job, process_segment_analysis
 from .config import settings
 from .models import (
     AdminOverview,
@@ -21,6 +24,7 @@ from .models import (
     IngestSessionOpen,
     MedicalReport,
     RawChunkRecord,
+    SegmentAnalysisResult,
     SegmentDetail,
     SegmentRecord,
     SegmentUploadCreate,
@@ -137,6 +141,42 @@ def get_session_segment(session_id: str, segment_id: str) -> SegmentDetail:
         return storage.get_segment_detail(session_id, segment_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail='Segment not found') from exc
+
+
+@app.get('/api/v1/sessions/{session_id}/segments/{segment_id}/csv')
+def download_session_segment_csv(session_id: str, segment_id: str) -> StreamingResponse:
+    if storage.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail='Session not found')
+    try:
+        segment = storage.get_segment_detail(session_id, segment_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Segment not found') from exc
+    filename = f'{segment.userName}_segment_{segment.segmentIndex}.csv'.replace(' ', '_')
+    return StreamingResponse(
+        iter([_segment_to_csv(segment)]),
+        media_type='text/csv; charset=utf-8',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post('/api/v1/sessions/{session_id}/segments/{segment_id}/analyze', response_model=SegmentAnalysisResult)
+def analyze_session_segment(session_id: str, segment_id: str) -> SegmentAnalysisResult:
+    if storage.get_session(session_id) is None:
+        raise HTTPException(status_code=404, detail='Session not found')
+    try:
+        report = process_segment_analysis(storage, settings, session_id, segment_id)
+        segment = storage.get_segment_detail(session_id, segment_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail='Segment not found') from exc
+    return SegmentAnalysisResult(segment=segment, report=report)
+
+
+@app.get('/api/v1/sessions/{session_id}/segments/{segment_id}/report', response_model=MedicalReport)
+def get_session_segment_report(session_id: str, segment_id: str) -> MedicalReport:
+    report = storage.get_segment_report(session_id, segment_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail='Segment report not found')
+    return report
 
 
 @app.get('/api/v1/users', response_model=list[UserRecord])
@@ -268,3 +308,38 @@ def admin_alerts(x_admin_token: str | None = Header(default=None)) -> list[Alert
 def _require_admin_token(token: str | None) -> None:
     if settings.admin_token and token != settings.admin_token:
         raise HTTPException(status_code=401, detail='Invalid admin token')
+
+
+def _segment_to_csv(segment: SegmentDetail) -> str:
+    timestamps = sorted(
+        {
+            _sample_timestamp(channel.startTimestampMs, channel.sampleRate, index)
+            for channel in segment.channels
+            for index, _ in enumerate(channel.samples)
+        }
+    )
+    channel_maps: dict[str, dict[int, float]] = {}
+    for channel in segment.channels:
+        channel_maps[channel.channelKey] = {
+            _sample_timestamp(channel.startTimestampMs, channel.sampleRate, index): sample
+            for index, sample in enumerate(channel.samples)
+        }
+
+    channel_keys = [channel.channelKey for channel in segment.channels]
+    buffer = StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(['timestamp_ms', *channel_keys])
+    for timestamp in timestamps:
+        writer.writerow(
+            [
+                timestamp,
+                *[channel_maps[channel_key].get(timestamp, 0) for channel_key in channel_keys],
+            ]
+        )
+    return buffer.getvalue()
+
+
+def _sample_timestamp(start_timestamp_ms: int, sample_rate: float, index: int) -> int:
+    if sample_rate <= 0:
+        return start_timestamp_ms + index
+    return start_timestamp_ms + round(index * 1000 / sample_rate)

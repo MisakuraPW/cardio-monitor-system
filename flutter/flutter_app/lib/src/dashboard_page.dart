@@ -679,6 +679,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       anchorTimestampMs: _controller.currentAnchorTimestampMs,
                       summary: _controller.channelSummary(channel.key),
                       runtime: _controller.channelRuntime(channel.key),
+                      enableHoverInspect: _controller.isPaused,
                     );
                   },
                 ),
@@ -799,6 +800,7 @@ class _WaveformCard extends StatefulWidget {
     required this.anchorTimestampMs,
     required this.summary,
     required this.runtime,
+    required this.enableHoverInspect,
   });
 
   final ChannelDescriptor channel;
@@ -810,6 +812,7 @@ class _WaveformCard extends StatefulWidget {
   final int anchorTimestampMs;
   final Map<String, dynamic> summary;
   final ChannelRuntimeStats runtime;
+  final bool enableHoverInspect;
 
   @override
   State<_WaveformCard> createState() => _WaveformCardState();
@@ -824,6 +827,9 @@ class _WaveformCardState extends State<_WaveformCard> {
   void didUpdateWidget(covariant _WaveformCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.points.isEmpty && _hoverInfo != null) {
+      _hoverInfo = null;
+    }
+    if (!widget.enableHoverInspect && _hoverInfo != null) {
       _hoverInfo = null;
     }
   }
@@ -865,9 +871,11 @@ class _WaveformCardState extends State<_WaveformCard> {
             ),
             const SizedBox(height: 8),
             Text(
-              _hoverInfo == null
-                  ? '提示：鼠标移动到波形上可查看当前点位数值。'
-                  : '游标值 ${_hoverInfo!.sample.value.toStringAsFixed(4)} ${widget.channel.unit} @ ${_formatTimestamp(_hoverInfo!.sample.timestampMs)}',
+              widget.enableHoverInspect
+                  ? (_hoverInfo == null
+                      ? '暂停回看中：鼠标移动到波形上可查看当前点位数值。'
+                      : '游标值 ${_hoverInfo!.sample.value.toStringAsFixed(4)} ${widget.channel.unit} @ ${_formatTimestamp(_hoverInfo!.sample.timestampMs)}')
+                  : '实时滚动中：已关闭鼠标取值以降低绘图压力。',
             ),
             const SizedBox(height: 12),
             SizedBox(
@@ -885,6 +893,9 @@ class _WaveformCardState extends State<_WaveformCard> {
                       }
                     },
                     onHover: (event) {
+                      if (!widget.enableHoverInspect) {
+                        return;
+                      }
                       final nowMs = DateTime.now().millisecondsSinceEpoch;
                       if (nowMs - _lastHoverUpdateMs < 120) {
                         return;

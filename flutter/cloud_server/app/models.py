@@ -205,6 +205,11 @@ class SegmentDetail(SegmentRecord):
     channels: list[SegmentChannelPayload] = Field(default_factory=list)
 
 
+class SegmentAnalysisResult(BaseModel):
+    segment: SegmentRecord
+    report: MedicalReport
+
+
 class AlertCreate(BaseModel):
     sessionId: str
     deviceId: str

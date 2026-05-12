@@ -142,6 +142,14 @@ class SQLiteStorage:
                 FOREIGN KEY(session_id) REFERENCES sessions(id)
             );
 
+            CREATE TABLE IF NOT EXISTS segment_reports (
+                segment_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                generated_at TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id)
+            );
+
             CREATE TABLE IF NOT EXISTS alerts (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -638,6 +646,42 @@ class SQLiteStorage:
             for item in payload.get('channels', [])
         ]
         return SegmentDetail(**record.model_dump(), channels=channels)
+
+    def save_segment_report(self, segment_id: str, report: MedicalReport) -> MedicalReport:
+        segment = self._get_segment_record_by_id(segment_id)
+        if segment is None:
+            raise KeyError(segment_id)
+        self.conn.execute(
+            '''
+            INSERT OR REPLACE INTO segment_reports (segment_id, session_id, generated_at, report_json)
+            VALUES (?, ?, ?, ?)
+            ''',
+            (
+                segment_id,
+                segment.sessionId,
+                report.generatedAt,
+                json.dumps(report.model_dump(), ensure_ascii=False),
+            ),
+        )
+        self._touch_session(segment.sessionId)
+        self.conn.commit()
+        return report
+
+    def get_segment_report(self, session_id: str, segment_id: str) -> MedicalReport | None:
+        row = self.conn.execute(
+            'SELECT report_json FROM segment_reports WHERE session_id = ? AND segment_id = ?',
+            (session_id, segment_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return MedicalReport(**json.loads(row['report_json']))
+
+    def _get_segment_record_by_id(self, segment_id: str) -> SegmentRecord | None:
+        row = self.conn.execute(
+            'SELECT * FROM segments WHERE id = ?',
+            (segment_id,),
+        ).fetchone()
+        return self._row_to_segment(row) if row else None
 
     def list_raw_chunks(self, session_id: str) -> list[RawChunkRecord]:
         rows = self.conn.execute(

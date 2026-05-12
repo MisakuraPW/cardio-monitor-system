@@ -534,6 +534,23 @@ class MedicalReport {
   }
 }
 
+class SegmentAnalysisResult {
+  const SegmentAnalysisResult({
+    required this.segment,
+    required this.report,
+  });
+
+  final SegmentRecord segment;
+  final MedicalReport report;
+
+  factory SegmentAnalysisResult.fromJson(Map<String, dynamic> json) {
+    return SegmentAnalysisResult(
+      segment: SegmentRecord.fromJson(json['segment'] as Map<String, dynamic>),
+      report: MedicalReport.fromJson(json['report'] as Map<String, dynamic>),
+    );
+  }
+}
+
 class SamplePoint {
   const SamplePoint({
     required this.timestampMs,

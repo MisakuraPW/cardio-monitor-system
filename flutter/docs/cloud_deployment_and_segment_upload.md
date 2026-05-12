@@ -47,11 +47,19 @@ sudo systemctl enable --now docker
 拉取项目：
 
 ```bash
-mkdir -p /root/cardio-monitor
 cd /root/cardio-monitor
-git clone <你的远程仓库地址> cardio-monitor-system
-cd cardio-monitor-system/flutter/deploy
+rm -rf cardio-monitor-system
+
+git config --global http.version HTTP/1.1
+git config --global http.lowSpeedLimit 0
+git config --global http.lowSpeedTime 999999
+
+git clone --depth 1 --single-branch https://github.com/MisakuraPW/cardio-monitor-system.git cardio-monitor-system
+
+
+cd /root/cardio-monitor/cardio-monitor-system/flutter/deploy
 cp .env.example .env
+
 ```
 
 编辑 `.env`：
@@ -66,7 +74,7 @@ vi .env
 CARDIO_APP_ENV=production
 CARDIO_ANALYSIS_EXECUTION_MODE=queue
 CARDIO_ANALYSIS_PROVIDER=closed_source
-CARDIO_ADMIN_TOKEN=change-me
+CARDIO_ADMIN_TOKEN=123456
 CARDIO_ADMIN_WEB_API_BASE_URL=http://182.254.220.56:8000
 CARDIO_MQTT_HOST=host.docker.internal
 CARDIO_MQTT_PORT=1883

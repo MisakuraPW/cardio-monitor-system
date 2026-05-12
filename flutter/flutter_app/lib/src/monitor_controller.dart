@@ -12,7 +12,7 @@ class MonitorController extends ChangeNotifier {
   MonitorController()
       : mqttConfig = MqttAdapterConfig(),
         bluetoothConfig = BluetoothAdapterConfig(),
-        cloudApi = CloudApiService(baseUrl: 'http://127.0.0.1:8000') {
+        cloudApi = CloudApiService(baseUrl: 'http://182.254.220.56:8000') {
     _mqttAdapter = MqttDataSourceAdapter(mqttConfig);
     _fileAdapter = FileReplayAdapter();
     _bluetoothAdapter = BluetoothDataSourceAdapter(bluetoothConfig);
@@ -83,7 +83,7 @@ class MonitorController extends ChangeNotifier {
   double gain = 1;
   double liveDisplayLagSeconds = 2;
 
-  String cloudBaseUrl = 'http://127.0.0.1:8000';
+  String cloudBaseUrl = 'http://182.254.220.56:8000';
   String userName = '演示用户';
   bool autoSegmentUploadEnabled = true;
   int uploadedSegmentCount = 0;
