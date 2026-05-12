@@ -23,12 +23,12 @@ class MonitorController extends ChangeNotifier {
       buildMetrics: _buildSegmentMetrics,
     );
     _bindAdapter(_mqttAdapter);
-    _uiTickTimer = Timer.periodic(const Duration(milliseconds: 33), (_) {
+    _uiTickTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
       if (!_hasPendingFrameNotify) {
         return;
       }
       _hasPendingFrameNotify = false;
-      notifyListeners();
+      waveformNotifier.notifyListeners();
     });
   }
 
@@ -37,6 +37,7 @@ class MonitorController extends ChangeNotifier {
   final MqttAdapterConfig mqttConfig;
   final BluetoothAdapterConfig bluetoothConfig;
   final CloudApiService cloudApi;
+  final ChangeNotifier waveformNotifier = ChangeNotifier();
 
   late final MqttDataSourceAdapter _mqttAdapter;
   late final FileReplayAdapter _fileAdapter;
@@ -662,11 +663,8 @@ class MonitorController extends ChangeNotifier {
   }
 
   bool _isDefaultVisibleChannel(String key) =>
-      key == 'ecg' ||
       key == 'ecg_filtered' ||
-      key == 'ppg_ir' ||
       key == 'ppg_ir_filtered' ||
-      key == 'ppg_red' ||
       key == 'ppg_red_filtered';
 
   bool _isImuChannel(String key) => key.startsWith('imu_') || key == 'imu';
@@ -910,6 +908,7 @@ class MonitorController extends ChangeNotifier {
     _mqttAdapter.dispose();
     _fileAdapter.dispose();
     _bluetoothAdapter.dispose();
+    waveformNotifier.dispose();
     cloudApi.dispose();
     super.dispose();
   }
@@ -1318,7 +1317,7 @@ WaveformSlice _buildWaveformSlice(
   int firstVisibleIndex,
   int endExclusive,
 ) {
-  const maxVisiblePoints = 2400;
+  const maxVisiblePoints = 600;
   var minValue = points[firstVisibleIndex].value;
   var maxValue = minValue;
   final length = endExclusive - firstVisibleIndex;

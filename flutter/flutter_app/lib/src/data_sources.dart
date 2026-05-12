@@ -659,8 +659,6 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     _client = client;
     client.subscribe('$_baseTopic/status', MqttQos.atLeastOnce);
     if (config.demoMode) {
-      client.subscribe('$_baseTopic/waveform_bin/ecg', MqttQos.atMostOnce);
-      client.subscribe('$_baseTopic/waveform_bin/ppg', MqttQos.atMostOnce);
       client.subscribe('$_baseTopic/waveform_bin/ecg_filtered', MqttQos.atMostOnce);
       client.subscribe('$_baseTopic/waveform_bin/ppg_filtered', MqttQos.atMostOnce);
     } else {
@@ -679,11 +677,8 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
           type: 'set_channels',
           payload: <String, dynamic>{
             'enabledKeys': <String>[
-              'ecg',
               'ecg_filtered',
-              'ppg_ir',
               'ppg_ir_filtered',
-              'ppg_red',
               'ppg_red_filtered',
             ],
           },
@@ -820,7 +815,12 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       return true;
     }
 
-    _mergeBinaryCatalog(batch.channels);
+    final incomingChannels = config.demoMode
+        ? batch.channels
+            .where((ChannelDescriptor item) => _isDemoRealtimeChannel(item.key))
+            .toList(growable: false)
+        : batch.channels;
+    _mergeBinaryCatalog(incomingChannels);
     for (final SignalFrame frame in batch.frames) {
       if (config.demoMode && !_isDemoRealtimeChannel(frame.channelKey)) {
         continue;
@@ -838,11 +838,8 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
   }
 
   bool _isDemoRealtimeChannel(String key) =>
-      key == 'ecg' ||
       key == 'ecg_filtered' ||
-      key == 'ppg_ir' ||
       key == 'ppg_ir_filtered' ||
-      key == 'ppg_red' ||
       key == 'ppg_red_filtered';
 
   void _mergeBinaryCatalog(List<ChannelDescriptor> incoming) {

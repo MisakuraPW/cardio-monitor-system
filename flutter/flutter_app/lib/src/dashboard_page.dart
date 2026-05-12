@@ -28,6 +28,7 @@ class _DashboardPageState extends State<DashboardPage> {
   late final TextEditingController _bleServiceController;
   late final TextEditingController _bleNotifyController;
   late final TextEditingController _bleControlController;
+  late final Listenable _waveformListenable;
 
   int _sidePanelIndex = 0;
 
@@ -35,6 +36,10 @@ class _DashboardPageState extends State<DashboardPage> {
   void initState() {
     super.initState();
     _controller = MonitorController();
+    _waveformListenable = Listenable.merge(<Listenable>[
+      _controller,
+      _controller.waveformNotifier,
+    ]);
     _hostController = TextEditingController(text: _controller.mqttConfig.host);
     _portController = TextEditingController(text: _controller.mqttConfig.port.toString());
     _pathController = TextEditingController(text: _controller.mqttConfig.path);
@@ -69,44 +74,55 @@ class _DashboardPageState extends State<DashboardPage> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (BuildContext context, Widget? child) {
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('多源心肺功能监测上位机'),
-            actions: <Widget>[
-              Padding(
-                padding: const EdgeInsets.only(right: 16),
-                child: Center(child: _StatusBadge(status: _controller.status)),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('多源心肺功能监测上位机'),
+        actions: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: Center(
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (BuildContext context, Widget? child) =>
+                    _StatusBadge(status: _controller.status),
               ),
-            ],
+            ),
           ),
-          body: LayoutBuilder(
-            builder: (BuildContext context, BoxConstraints constraints) {
-              final isCompact = constraints.maxWidth < 1180;
-              final content = <Widget>[
-                SizedBox(
-                  width: isCompact ? double.infinity : 400,
-                  child: _buildControlPanel(context),
-                ),
-                SizedBox(width: isCompact ? 0 : 20, height: isCompact ? 20 : 0),
-                Expanded(child: _buildWaveformArea(context)),
-              ];
+        ],
+      ),
+      body: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final isCompact = constraints.maxWidth < 1180;
+          final content = <Widget>[
+            SizedBox(
+              width: isCompact ? double.infinity : 400,
+              child: AnimatedBuilder(
+                animation: _controller,
+                builder: (BuildContext context, Widget? child) =>
+                    _buildControlPanel(context),
+              ),
+            ),
+            SizedBox(width: isCompact ? 0 : 20, height: isCompact ? 20 : 0),
+            Expanded(
+              child: AnimatedBuilder(
+                animation: _waveformListenable,
+                builder: (BuildContext context, Widget? child) =>
+                    _buildWaveformArea(context),
+              ),
+            ),
+          ];
 
-              return Padding(
-                padding: const EdgeInsets.all(20),
-                child: isCompact
-                    ? Column(children: content)
-                    : Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: content,
-                      ),
-              );
-            },
-          ),
-        );
-      },
+          return Padding(
+            padding: const EdgeInsets.all(20),
+            child: isCompact
+                ? Column(children: content)
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: content,
+                  ),
+          );
+        },
+      ),
     );
   }
 
@@ -935,6 +951,7 @@ class _WaveformCardState extends State<_WaveformCard> {
                               gain: widget.gain,
                               secondsPerScreen: widget.secondsPerScreen,
                               anchorTimestampMs: widget.anchorTimestampMs,
+                              showLabels: widget.enableHoverInspect,
                             ),
                             child: widget.points.isEmpty
                                 ? const Center(child: Text('当前窗口暂无数据'))
@@ -1024,32 +1041,9 @@ class _WaveformCardState extends State<_WaveformCard> {
   }
 
   _WaveformViewport _targetViewport() {
-    if (widget.points.length < 12) {
-      return _WaveformViewport.fromBounds(
-        minValue: widget.minValue,
-        maxValue: widget.maxValue,
-      );
-    }
-
-    final values = widget.points
-        .map((SamplePoint item) => item.value)
-        .toList(growable: false)
-      ..sort();
-    final lowIndex =
-        (values.length * 0.02).floor().clamp(0, values.length - 1).toInt();
-    final highIndex =
-        (values.length * 0.98).ceil().clamp(1, values.length).toInt() - 1;
-    final robustMin = values[lowIndex];
-    final robustMax = values[highIndex];
-    if ((robustMax - robustMin).abs() < 0.0001) {
-      return _WaveformViewport.fromBounds(
-        minValue: widget.minValue,
-        maxValue: widget.maxValue,
-      );
-    }
     return _WaveformViewport.fromBounds(
-      minValue: robustMin,
-      maxValue: robustMax,
+      minValue: widget.minValue,
+      maxValue: widget.maxValue,
     );
   }
 
@@ -1155,6 +1149,7 @@ class _WaveformPainter extends CustomPainter {
     required this.gain,
     required this.secondsPerScreen,
     required this.anchorTimestampMs,
+    required this.showLabels,
   });
 
   final List<SamplePoint> points;
@@ -1163,6 +1158,7 @@ class _WaveformPainter extends CustomPainter {
   final double gain;
   final double secondsPerScreen;
   final int anchorTimestampMs;
+  final bool showLabels;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1178,11 +1174,9 @@ class _WaveformPainter extends CustomPainter {
       ..strokeWidth = 1.4;
     final signalPaint = Paint()
       ..color = color
-      ..strokeWidth = 2.2
+      ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke
-      ..isAntiAlias = true
-      ..strokeJoin = StrokeJoin.round
-      ..strokeCap = StrokeCap.round;
+      ..isAntiAlias = false;
 
     final rect = Offset.zero & size;
     final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(14));
@@ -1209,12 +1203,14 @@ class _WaveformPainter extends CustomPainter {
       final labelDx = i == verticalDivisions
           ? dx - 34
           : dx + 4;
-      _drawLabel(
-        canvas,
-        size,
-        text: '-${secondsLeft.toStringAsFixed(1)}s',
-        offset: Offset(labelDx, size.height - 18),
-      );
+      if (showLabels) {
+        _drawLabel(
+          canvas,
+          size,
+          text: '-${secondsLeft.toStringAsFixed(1)}s',
+          offset: Offset(labelDx, size.height - 18),
+        );
+      }
     }
 
     for (var j = 0; j <= horizontalDivisions; j++) {
@@ -1242,12 +1238,14 @@ class _WaveformPainter extends CustomPainter {
         Offset(chartLeft, dy),
         axisPaint,
       );
-      _drawLabel(
-        canvas,
-        size,
-        text: labelValue.toStringAsFixed(2),
-        offset: Offset(6, (dy - 7).clamp(2.0, size.height - 18)),
-      );
+      if (showLabels) {
+        _drawLabel(
+          canvas,
+          size,
+          text: labelValue.toStringAsFixed(2),
+          offset: Offset(6, (dy - 7).clamp(2.0, size.height - 18)),
+        );
+      }
     }
 
     final windowMs = (secondsPerScreen * 1000).round();
@@ -1303,22 +1301,10 @@ class _WaveformPainter extends CustomPainter {
       path.lineTo(last.dx, last.dy);
       return;
     }
-    for (var index = start + 1; index < endExclusive - 1; index++) {
+    for (var index = start + 1; index < endExclusive; index++) {
       final current = offsets[index];
-      final next = offsets[index + 1];
-      final control = Offset(
-        (current.dx + next.dx) / 2,
-        (current.dy + next.dy) / 2,
-      );
-      path.quadraticBezierTo(
-        current.dx,
-        current.dy,
-        control.dx,
-        control.dy,
-      );
+      path.lineTo(current.dx, current.dy);
     }
-    final last = offsets[endExclusive - 1];
-    path.lineTo(last.dx, last.dy);
   }
 
   List<SamplePoint> _downsamplePoints(
@@ -1382,6 +1368,7 @@ class _WaveformPainter extends CustomPainter {
         oldDelegate.gain != gain ||
         oldDelegate.anchorTimestampMs != anchorTimestampMs ||
         oldDelegate.secondsPerScreen != secondsPerScreen ||
+        oldDelegate.showLabels != showLabels ||
         oldDelegate.color != color;
   }
 }
