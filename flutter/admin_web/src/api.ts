@@ -3,6 +3,9 @@ import type {
   AdminSessionItem,
   AlertRecord,
   DeviceRecord,
+  LlmConfig,
+  LlmTestResult,
+  MedicalReport,
   SegmentDetail,
   SessionDetail,
   SessionRecord,
@@ -34,7 +37,7 @@ export const api = {
   getSegmentDetail: (sessionId: string, segmentId: string) =>
     requestJson<SegmentDetail>(`/api/v1/sessions/${sessionId}/segments/${segmentId}`),
   analyzeSegment: (sessionId: string, segmentId: string) =>
-    requestJson<{ report: { summary: string; confidence?: number | null; recommendations: string[] } }>(
+    requestJson<{ report: MedicalReport }>(
       `/api/v1/sessions/${sessionId}/segments/${segmentId}/analyze`,
       { method: 'POST' },
     ),
@@ -42,4 +45,11 @@ export const api = {
     `${API_BASE_URL}/api/v1/sessions/${sessionId}/segments/${segmentId}/csv`,
   getDevices: () => requestJson<DeviceRecord[]>('/api/v1/admin/devices'),
   getAlerts: () => requestJson<AlertRecord[]>('/api/v1/admin/alerts'),
+  getLlmConfig: () => requestJson<LlmConfig>('/api/v1/llm/config'),
+  testLlmConnection: (payload: { apiBaseUrl: string; apiKey: string; model: string }) =>
+    requestJson<LlmTestResult>('/api/v1/llm/test', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 }

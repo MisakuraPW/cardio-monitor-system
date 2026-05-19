@@ -93,7 +93,46 @@ export type AlertRecord = {
   payload: Record<string, unknown>
 }
 
-export type AdminOverview = {
+export type ReportFinding = {
+  title: string
+  severity: string
+  detail: string
+}
+
+export type MedicalReport = {
+  sessionId: string
+  generatedAt: string
+  summary: string
+  recommendations: string[]
+  findings: ReportFinding[]
+  riskLevel?: string | null
+  confidence?: number | null
+  modelTrace?: {
+    provider: string
+    route: string
+    status: string
+    model?: string | null
+    promptVersion?: string | null
+    note?: string | null
+  } | null
+}
+
+export type LlmConfig = {
+  configured: boolean
+  apiBaseUrl: string
+  model: string
+  promptVersion: string
+  systemPrompt: string
+  outputSchema: Record<string, unknown>
+  latestReport: MedicalReport | null
+}
+
+export type LlmTestResult = {
+  success: boolean
+  model?: string
+  response?: string
+  error?: string
+}
   deviceCount: number
   sessionCount: number
   uploadCount: number
@@ -110,11 +149,7 @@ export type SessionDetail = {
   session: SessionRecord
   uploads: UploadRecord[]
   jobs: AnalysisJobRecord[]
-  report?: {
-    summary: string
-    confidence?: number | null
-    recommendations: string[]
-  } | null
+  report?: MedicalReport | null
   rawChunks: Array<{ id: string; channelKey: string; sourceType: string; sampleCount: number; objectKey: string }>
   segments: SegmentRecord[]
   alerts: AlertRecord[]
