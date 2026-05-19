@@ -164,6 +164,7 @@ class SQLiteStorage:
         )
         self._ensure_column('reports', 'confidence', 'REAL')
         self._ensure_column('reports', 'model_trace_json', 'TEXT')
+        self._ensure_column('reports', 'risk_level', 'TEXT')
         self._ensure_column('sessions', 'user_id', "TEXT NOT NULL DEFAULT ''")
         self._ensure_column('sessions', 'user_name', "TEXT NOT NULL DEFAULT '演示用户'")
         self._ensure_column('sessions', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'")
@@ -374,7 +375,7 @@ class SQLiteStorage:
 
     def save_report(self, report: MedicalReport) -> MedicalReport:
         self.conn.execute(
-            'INSERT OR REPLACE INTO reports (session_id, generated_at, summary, recommendations_json, findings_json, confidence, model_trace_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            'INSERT OR REPLACE INTO reports (session_id, generated_at, summary, recommendations_json, findings_json, confidence, model_trace_json, risk_level) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             (
                 report.sessionId,
                 report.generatedAt,
@@ -383,6 +384,7 @@ class SQLiteStorage:
                 json.dumps([item.model_dump() for item in report.findings], ensure_ascii=False),
                 report.confidence,
                 json.dumps(report.modelTrace.model_dump(), ensure_ascii=False) if report.modelTrace else None,
+                report.riskLevel,
             ),
         )
         self._touch_session(report.sessionId)
@@ -391,6 +393,10 @@ class SQLiteStorage:
 
     def get_report(self, session_id: str) -> MedicalReport | None:
         row = self.conn.execute('SELECT * FROM reports WHERE session_id = ?', (session_id,)).fetchone()
+        return self._row_to_report(row) if row else None
+
+    def get_latest_report(self) -> MedicalReport | None:
+        row = self.conn.execute('SELECT * FROM reports ORDER BY generated_at DESC LIMIT 1').fetchone()
         return self._row_to_report(row) if row else None
 
     def upsert_device(self, payload: DeviceUpsert) -> DeviceRecord:
@@ -840,6 +846,7 @@ class SQLiteStorage:
             summary=row['summary'],
             recommendations=json.loads(row['recommendations_json']),
             findings=json.loads(row['findings_json']),
+            riskLevel=row['risk_level'] if 'risk_level' in row.keys() else None,
             confidence=row['confidence'],
             modelTrace=json.loads(row['model_trace_json']) if row['model_trace_json'] else None,
         )
