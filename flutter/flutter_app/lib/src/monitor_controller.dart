@@ -581,6 +581,7 @@ class MonitorController extends ChangeNotifier {
             )
             .toList(),
       },
+      'physiologicalMetrics': snapshot.physio.toJson(),
     };
   }
 
@@ -840,7 +841,187 @@ class MonitorController extends ChangeNotifier {
       meanQuality: qualityCount == 0 ? 0 : qualityAccumulator / qualityCount,
       channels: channels,
       findings: _deduplicateFindings(findings).take(8).toList(),
+      physio: _computePhysio(),
     );
+  }
+
+  PhysiologicalMetrics _computePhysio() {
+    double? heartRateBpm;
+    double? hrvRmssd;
+    double? hrvSdnn;
+    double? hrvPnn50;
+    double? respiratoryRateBpm;
+    double? spo2Percent;
+    double? temperatureCelsius;
+    final notes = <String>[];
+
+    // Heart rate & HRV from ECG R-R intervals via peak detection
+    final ecgBuffer = _buffers['ecg_filtered'] ?? _buffers['ecg'];
+    if (ecgBuffer != null && ecgBuffer.hasPoints) {
+      final points = ecgBuffer.allPoints;
+      if (points.length >= 50) {
+        final rrIntervals = _detectRRIntervals(points);
+        if (rrIntervals.length >= 3) {
+          final meanRR = rrIntervals.reduce((a, b) => a + b) / rrIntervals.length;
+          heartRateBpm = meanRR > 0 ? 60000.0 / meanRR : null;
+
+          // SDNN
+          final variance = rrIntervals.map((r) => math.pow(r - meanRR, 2)).reduce((a, b) => a + b) / rrIntervals.length;
+          hrvSdnn = math.sqrt(variance);
+
+          // RMSSD
+          if (rrIntervals.length >= 2) {
+            final diffs = <double>[];
+            for (var i = 1; i < rrIntervals.length; i++) {
+              diffs.add(math.pow(rrIntervals[i] - rrIntervals[i - 1], 2).toDouble());
+            }
+            hrvRmssd = math.sqrt(diffs.reduce((a, b) => a + b) / diffs.length);
+          }
+
+          // pNN50
+          if (rrIntervals.length >= 2) {
+            var count50 = 0;
+            for (var i = 1; i < rrIntervals.length; i++) {
+              if ((rrIntervals[i] - rrIntervals[i - 1]).abs() > 50) count50++;
+            }
+            hrvPnn50 = count50 / (rrIntervals.length - 1) * 100.0;
+          }
+
+          if (heartRateBpm != null && (heartRateBpm < 40 || heartRateBpm > 150)) {
+            notes.add('心率估算值偏离正常范围，请检查信号质量');
+          }
+        }
+      }
+    }
+
+    // Respiratory rate from PPG baseline wander (low-frequency modulation)
+    final ppgBuffer = _buffers['ppg_ir_filtered'] ?? _buffers['ppg_ir'];
+    if (ppgBuffer != null && ppgBuffer.hasPoints) {
+      final points = ppgBuffer.allPoints;
+      if (points.length >= 100) {
+        respiratoryRateBpm = _estimateRespiratoryRate(points);
+      }
+    }
+
+    // SpO2 estimate from PPG IR/Red ratio
+    final ppgIrBuffer = _buffers['ppg_ir_filtered'] ?? _buffers['ppg_ir'];
+    final ppgRedBuffer = _buffers['ppg_red_filtered'] ?? _buffers['ppg_red'];
+    if (ppgIrBuffer != null && ppgRedBuffer != null &&
+        ppgIrBuffer.hasPoints && ppgRedBuffer.hasPoints) {
+      spo2Percent = _estimateSpO2(ppgIrBuffer, ppgRedBuffer);
+    }
+
+    // Temperature from temp channel
+    final tempBuffer = _buffers['temp'];
+    if (tempBuffer != null && tempBuffer.hasPoints) {
+      final summary = tempBuffer.summary();
+      final mean = _asNullableDouble(summary['mean']);
+      if (mean != null && mean > 20 && mean < 45) {
+        temperatureCelsius = mean;
+      }
+    }
+
+    return PhysiologicalMetrics(
+      heartRateBpm: heartRateBpm,
+      hrvRmssd: hrvRmssd,
+      hrvSdnn: hrvSdnn,
+      hrvPnn50: hrvPnn50,
+      respiratoryRateBpm: respiratoryRateBpm,
+      spo2Percent: spo2Percent,
+      temperatureCelsius: temperatureCelsius,
+      notes: notes,
+    );
+  }
+
+  // Simple threshold-based R-peak detector; returns RR intervals in ms
+  List<double> _detectRRIntervals(List<SamplePoint> points) {
+    if (points.length < 10) return const <double>[];
+    final values = points.map((p) => p.value).toList();
+    final mean = values.reduce((a, b) => a + b) / values.length;
+    final variance = values.map((v) => math.pow(v - mean, 2)).reduce((a, b) => a + b) / values.length;
+    final stdDev = math.sqrt(variance);
+    final threshold = mean + stdDev * 0.6;
+
+    final peaks = <int>[];
+    const minPeakDistanceMs = 300; // ~200 BPM max
+    for (var i = 1; i < points.length - 1; i++) {
+      if (values[i] > threshold &&
+          values[i] > values[i - 1] &&
+          values[i] >= values[i + 1]) {
+        if (peaks.isEmpty ||
+            points[i].timestampMs - points[peaks.last].timestampMs >= minPeakDistanceMs) {
+          peaks.add(i);
+        }
+      }
+    }
+
+    if (peaks.length < 2) return const <double>[];
+    final rrIntervals = <double>[];
+    for (var i = 1; i < peaks.length; i++) {
+      final rr = (points[peaks[i]].timestampMs - points[peaks[i - 1]].timestampMs).toDouble();
+      if (rr >= 300 && rr <= 2000) rrIntervals.add(rr); // 30–200 BPM range
+    }
+    return rrIntervals;
+  }
+
+  // Estimate respiratory rate from PPG baseline wander via zero-crossing count
+  double? _estimateRespiratoryRate(List<SamplePoint> points) {
+    if (points.length < 50) return null;
+    final durationSeconds = (points.last.timestampMs - points.first.timestampMs) / 1000.0;
+    if (durationSeconds < 5) return null;
+
+    // Downsample to ~4 Hz for respiratory band
+    final step = math.max(1, (points.length / (durationSeconds * 4)).round());
+    final downsampled = <double>[];
+    for (var i = 0; i < points.length; i += step) {
+      downsampled.add(points[i].value);
+    }
+
+    // Simple moving average to extract baseline (respiratory component)
+    const windowSize = 8;
+    final baseline = <double>[];
+    for (var i = 0; i < downsampled.length; i++) {
+      final start = math.max(0, i - windowSize ~/ 2);
+      final end = math.min(downsampled.length, i + windowSize ~/ 2 + 1);
+      final window = downsampled.sublist(start, end);
+      baseline.add(window.reduce((a, b) => a + b) / window.length);
+    }
+
+    // Count zero crossings of baseline
+    var crossings = 0;
+    for (var i = 1; i < baseline.length; i++) {
+      if ((baseline[i - 1] < 0 && baseline[i] >= 0) ||
+          (baseline[i - 1] >= 0 && baseline[i] < 0)) {
+        crossings++;
+      }
+    }
+
+    final breathsPerMinute = (crossings / 2.0) / (durationSeconds / 60.0);
+    if (breathsPerMinute < 4 || breathsPerMinute > 40) return null;
+    return breathsPerMinute;
+  }
+
+  // SpO2 estimate using ratio-of-ratios: R = (AC_red/DC_red) / (AC_ir/DC_ir)
+  // SpO2 ≈ 110 - 25*R (empirical calibration curve)
+  double? _estimateSpO2(WaveformBuffer irBuffer, WaveformBuffer redBuffer) {
+    final irSummary = irBuffer.summary();
+    final redSummary = redBuffer.summary();
+    final irMean = _asNullableDouble(irSummary['mean']);
+    final irRms = _asNullableDouble(irSummary['rms']);
+    final redMean = _asNullableDouble(redSummary['mean']);
+    final redRms = _asNullableDouble(redSummary['rms']);
+    if (irMean == null || irRms == null || redMean == null || redRms == null) return null;
+    if (irMean <= 0 || redMean <= 0) return null;
+
+    // AC component approximated as RMS of AC-coupled signal
+    final irAC = math.sqrt(math.max(0, irRms * irRms - irMean * irMean));
+    final redAC = math.sqrt(math.max(0, redRms * redRms - redMean * redMean));
+    if (irAC <= 0 || redAC <= 0) return null;
+
+    final r = (redAC / redMean) / (irAC / irMean);
+    final spo2 = 110.0 - 25.0 * r;
+    if (spo2 < 70 || spo2 > 100) return null;
+    return spo2;
   }
 
   List<String> _deduplicateFindings(List<String> findings) {
@@ -1487,6 +1668,9 @@ class WaveformBuffer implements WaveformHistoryStore {
   @override
   int get latestPointTimestampMs => hasPoints ? _points.last.timestampMs : 0;
   int get activeLength => _points.length - _startIndex;
+
+  List<SamplePoint> get allPoints =>
+      hasPoints ? _points.sublist(_startIndex) : const <SamplePoint>[];
 
   WaveformBufferSnapshot snapshot() {
     final activePoints = hasPoints

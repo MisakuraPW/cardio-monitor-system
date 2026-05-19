@@ -506,6 +506,8 @@ class MedicalReport {
     required this.summary,
     required this.recommendations,
     required this.findings,
+    this.riskLevel,
+    this.confidence,
   });
 
   final String sessionId;
@@ -513,6 +515,8 @@ class MedicalReport {
   final String summary;
   final List<String> recommendations;
   final List<ReportFinding> findings;
+  final String? riskLevel;
+  final double? confidence;
 
   factory MedicalReport.fromJson(Map<String, dynamic> json) {
     final recommendations =
@@ -530,6 +534,8 @@ class MedicalReport {
       summary: (json['summary'] ?? '') as String,
       recommendations: recommendations,
       findings: findings,
+      riskLevel: json['riskLevel'] as String?,
+      confidence: (json['confidence'] as num?)?.toDouble(),
     );
   }
 }
@@ -627,6 +633,46 @@ class LocalChannelAnalysis {
   final List<String> notes;
 }
 
+class PhysiologicalMetrics {
+  const PhysiologicalMetrics({
+    this.heartRateBpm,
+    this.hrvRmssd,
+    this.hrvSdnn,
+    this.hrvPnn50,
+    this.respiratoryRateBpm,
+    this.spo2Percent,
+    this.temperatureCelsius,
+    this.notes = const <String>[],
+  });
+
+  final double? heartRateBpm;
+  final double? hrvRmssd;
+  final double? hrvSdnn;
+  final double? hrvPnn50;
+  final double? respiratoryRateBpm;
+  final double? spo2Percent;
+  final double? temperatureCelsius;
+  final List<String> notes;
+
+  bool get hasAny =>
+      heartRateBpm != null ||
+      hrvRmssd != null ||
+      respiratoryRateBpm != null ||
+      spo2Percent != null ||
+      temperatureCelsius != null;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        if (heartRateBpm != null) 'heartRateBpm': heartRateBpm,
+        if (hrvRmssd != null) 'hrv_rmssd': hrvRmssd,
+        if (hrvSdnn != null) 'hrv_sdnn': hrvSdnn,
+        if (hrvPnn50 != null) 'hrv_pnn50': hrvPnn50,
+        if (respiratoryRateBpm != null) 'respiratoryRateBpm': respiratoryRateBpm,
+        if (spo2Percent != null) 'spo2Percent': spo2Percent,
+        if (temperatureCelsius != null) 'temperatureCelsius': temperatureCelsius,
+        if (notes.isNotEmpty) 'notes': notes,
+      };
+}
+
 class LocalAnalysisSnapshot {
   const LocalAnalysisSnapshot({
     required this.activeChannels,
@@ -634,6 +680,7 @@ class LocalAnalysisSnapshot {
     required this.meanQuality,
     required this.channels,
     required this.findings,
+    this.physio = const PhysiologicalMetrics(),
   });
 
   final int activeChannels;
@@ -641,6 +688,7 @@ class LocalAnalysisSnapshot {
   final double meanQuality;
   final List<LocalChannelAnalysis> channels;
   final List<String> findings;
+  final PhysiologicalMetrics physio;
 }
 
 Color colorFromHex(String hex) {

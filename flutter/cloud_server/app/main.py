@@ -23,6 +23,7 @@ from .models import (
     FrameBatchIngest,
     IngestSessionOpen,
     MedicalReport,
+    PatientProfile,
     RawChunkRecord,
     SegmentAnalysisResult,
     SegmentDetail,
@@ -160,11 +161,16 @@ def download_session_segment_csv(session_id: str, segment_id: str) -> StreamingR
 
 
 @app.post('/api/v1/sessions/{session_id}/segments/{segment_id}/analyze', response_model=SegmentAnalysisResult)
-def analyze_session_segment(session_id: str, segment_id: str) -> SegmentAnalysisResult:
+def analyze_session_segment(
+    session_id: str,
+    segment_id: str,
+    payload: AnalysisJobCreate | None = None,
+) -> SegmentAnalysisResult:
     if storage.get_session(session_id) is None:
         raise HTTPException(status_code=404, detail='Session not found')
+    patient_profile = payload.patientProfile if payload else None
     try:
-        report = process_segment_analysis(storage, settings, session_id, segment_id)
+        report = process_segment_analysis(storage, settings, session_id, segment_id, patient_profile=patient_profile)
         segment = storage.get_segment_detail(session_id, segment_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail='Segment not found') from exc
@@ -198,7 +204,7 @@ def create_analysis_job(payload: AnalysisJobCreate) -> AnalysisJobRecord:
 
     job = storage.create_analysis_job(payload)
     if settings.analysis_execution_mode == 'inline':
-        process_analysis_job(storage, settings, job.id)
+        process_analysis_job(storage, settings, job.id, patient_profile=payload.patientProfile)
         return storage.get_analysis_job(job.id)
     return job
 
