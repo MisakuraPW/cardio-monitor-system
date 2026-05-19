@@ -11,6 +11,7 @@
 #include "data_logger.h"
 #include "ecg_adc.h"
 #include "imu_bmi160.h"
+#include "m601_temp.h"
 #include "ppg_max30102.h"
 #include "signal_dsp.h"
 
@@ -19,6 +20,7 @@ namespace {
 QueueHandle_t g_ecgQueue = nullptr;
 QueueHandle_t g_ppgQueue = nullptr;
 QueueHandle_t g_imuQueue = nullptr;
+QueueHandle_t g_tempQueue = nullptr;
 
 struct TxPacket {
   uint16_t len;
@@ -29,12 +31,15 @@ QueueHandle_t g_uartTxQueue = nullptr;
 
 bool g_ppgOnline = false;
 bool g_imuOnline = false;
+bool g_tempOnline = false;
 
 TickType_t g_ppgLastSampleTick = 0;
 TickType_t g_imuLastSampleTick = 0;
+TickType_t g_tempLastSampleTick = 0;
 
 constexpr TickType_t kPpgPeriodTicks = pdMS_TO_TICKS(PPG_SAMPLE_PERIOD_US / 1000U);
 constexpr TickType_t kImuPeriodTicks = pdMS_TO_TICKS(BMI_SAMPLE_PERIOD_US / 1000U);
+constexpr TickType_t kTempPeriodTicks = pdMS_TO_TICKS(M601_SAMPLE_PERIOD_MS);
 constexpr TickType_t kEcgPeriodTicks = pdMS_TO_TICKS(2);
 constexpr TickType_t kSensorStallTimeout = pdMS_TO_TICKS(2000);
 constexpr TickType_t kReinitRetryInterval = pdMS_TO_TICKS(1000);
@@ -43,6 +48,7 @@ constexpr uint32_t kPacketizerYieldEveryLoops = 20;
 constexpr size_t kPacketizerEcgBatch = 8;
 constexpr size_t kPacketizerPpgBatch = 4;
 constexpr size_t kPacketizerImuBatch = 4;
+constexpr size_t kPacketizerTempBatch = 4;
 constexpr bool kEnableUartStream = (ENABLE_UART_OUTPUT == 1);
 constexpr bool kEnableWifiOutput = (ENABLE_WIFI_OUTPUT == 1);
 constexpr bool kEnableBleOutput = (ENABLE_BLE_OUTPUT == 1);
@@ -130,6 +136,13 @@ struct ImuPayloadBin {
   int16_t gy;
   int16_t gz;
 };
+
+struct TemperaturePayloadBin {
+  uint64_t ts_us;
+  int16_t raw;
+  float temp_c;
+  uint8_t flags;
+};
 #pragma pack(pop)
 
 void emitEcg(const EcgSample& s) {
@@ -208,6 +221,31 @@ void emitImu(const ImuSample& s) {
   }
 }
 
+void emitTemperature(const TemperatureSample& s) {
+  if (kEnableWifiOutput) {
+    (void)cloud_mqtt::enqueueTemperature(s);
+  }
+  if (kEnableBleOutput) {
+    (void)ble_stream::enqueueTemperature(s);
+  }
+  if (kEnableUartStream && kOutBinary) {
+    const TemperaturePayloadBin p{ s.ts_us, s.raw, s.temp_c, s.flags };
+    (void)pushBinaryFrame('T', &p, static_cast<uint8_t>(sizeof(p)));
+  }
+
+  if (kEnableUartStream && (kOutVerboseText || kOutCompactText)) {
+    char line[64];
+    if (kOutVerboseText) {
+      snprintf(line, sizeof(line), "TEMP,%llu,%d,%.4f,%u\n", s.ts_us, s.raw,
+               static_cast<double>(s.temp_c), s.flags);
+    } else {
+      snprintf(line, sizeof(line), "T,%llu,%d,%.4f,%u\n", s.ts_us, s.raw,
+               static_cast<double>(s.temp_c), s.flags);
+    }
+    (void)pushTextLine(line);
+  }
+}
+
 bool bringUpPpg(const bool recoveryMode) {
   if (!ppg_max30102::begin()) {
     data_logger::logStatus(recoveryMode ? "MAX30102 reinit failed." : "MAX30102 init failed.");
@@ -231,6 +269,16 @@ bool bringUpImu(const bool recoveryMode) {
   }
   g_imuLastSampleTick = xTaskGetTickCount();
   data_logger::logStatus(recoveryMode ? "BMI160 recovered." : "BMI160 ready.");
+  return true;
+}
+
+bool bringUpTemp(const bool recoveryMode) {
+  if (!m601_temp::begin()) {
+    data_logger::logStatus(recoveryMode ? "M601 reinit failed." : "M601 init failed.");
+    return false;
+  }
+  g_tempLastSampleTick = xTaskGetTickCount();
+  data_logger::logStatus(recoveryMode ? "M601 recovered." : "M601 ready.");
   return true;
 }
 
@@ -311,6 +359,35 @@ void imuTask(void* /*pvParameters*/) {
   }
 }
 
+void tempTask(void* /*pvParameters*/) {
+  TickType_t lastWake = xTaskGetTickCount();
+  TickType_t lastRetryTick = 0;
+
+  for (;;) {
+    const TickType_t now = xTaskGetTickCount();
+
+    if (!g_tempOnline) {
+      if ((now - lastRetryTick) >= kReinitRetryInterval) {
+        lastRetryTick = now;
+        g_tempOnline = bringUpTemp(true);
+      }
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    TemperatureSample sample{};
+    if (m601_temp::readSample(sample)) {
+      g_tempLastSampleTick = now;
+      (void)xQueueSend(g_tempQueue, &sample, pdMS_TO_TICKS(10));
+    } else if ((now - g_tempLastSampleTick) > kSensorStallTimeout) {
+      g_tempOnline = false;
+      data_logger::logStatus("M601 stalled, entering recovery.");
+    }
+
+    vTaskDelayUntil(&lastWake, kTempPeriodTicks);
+  }
+}
+
 void packetizerTask(void* /*pvParameters*/) {
   if (kEnableUartStream && kOutVerboseText) {
     (void)pushTextLine("# type,ts_us,data...\n");
@@ -353,6 +430,16 @@ void packetizerTask(void* /*pvParameters*/) {
       ++processed;
     }
 
+    TemperatureSample temp{};
+    for (size_t i = 0; i < kPacketizerTempBatch; ++i) {
+      if (xQueueReceive(g_tempQueue, &temp, 0) != pdPASS) {
+        break;
+      }
+      emitTemperature(temp);
+      didWork = true;
+      ++processed;
+    }
+
     if (!didWork) {
       vTaskDelay(pdMS_TO_TICKS(1));
     } else {
@@ -391,6 +478,7 @@ void createQueues() {
   g_ecgQueue = xQueueCreate(ECG_QUEUE_LEN, sizeof(EcgSample));
   g_ppgQueue = xQueueCreate(PPG_QUEUE_LEN, sizeof(PpgSample));
   g_imuQueue = xQueueCreate(IMU_QUEUE_LEN, sizeof(ImuSample));
+  g_tempQueue = xQueueCreate(TEMP_QUEUE_LEN, sizeof(TemperatureSample));
   if (kEnableUartStream) {
     g_uartTxQueue = xQueueCreate(256, sizeof(TxPacket));
   } else {
@@ -411,6 +499,10 @@ void createTasks() {
   }
   if (xTaskCreatePinnedToCore(imuTask, "imu_task", IMU_TASK_STACK, nullptr,
                               IMU_TASK_PRIORITY, nullptr, 0) != pdPASS) {
+    taskCreateFailed = true;
+  }
+  if (xTaskCreatePinnedToCore(tempTask, "temp_task", TEMP_TASK_STACK, nullptr,
+                              TEMP_TASK_PRIORITY, nullptr, 0) != pdPASS) {
     taskCreateFailed = true;
   }
 
@@ -471,6 +563,7 @@ void setup() {
   }
   createQueues();
   if (g_ecgQueue == nullptr || g_ppgQueue == nullptr || g_imuQueue == nullptr ||
+      g_tempQueue == nullptr ||
       (kEnableUartStream && g_uartTxQueue == nullptr)) {
     data_logger::logStatus(F("Queue creation failed."));
     while (true) {
@@ -480,6 +573,7 @@ void setup() {
 
   g_ppgOnline = bringUpPpg(false);
   g_imuOnline = bringUpImu(false);
+  g_tempOnline = bringUpTemp(false);
 
   ecg_adc::begin();
   ecg_adc::start();

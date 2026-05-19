@@ -17,12 +17,14 @@ PubSubClient g_mqttClient(g_wifiClient);
 QueueHandle_t g_ecgMqttQueue = nullptr;
 QueueHandle_t g_ppgMqttQueue = nullptr;
 QueueHandle_t g_imuMqttQueue = nullptr;
+QueueHandle_t g_tempMqttQueue = nullptr;
 
 char g_clientId[48] = {};
 uint32_t g_metricsSeq = 0;
 uint32_t g_ecgSeq = 0;
 uint32_t g_ppgSeq = 0;
 uint32_t g_imuSeq = 0;
+uint32_t g_tempSeq = 0;
 uint32_t g_lastWifiRetryMs = 0;
 uint32_t g_lastMqttRetryMs = 0;
 uint32_t g_lastDiagPublishMs = 0;
@@ -34,13 +36,16 @@ constexpr bool kDemoPublishFilteredWaveforms = true;
 bool g_enableEcg = true;
 bool g_enablePpg = true;
 bool g_enableImu = !kDemoWifiMode;
+bool g_enableTemp = true;
 
 uint32_t g_dropEcg = 0;
 uint32_t g_dropPpg = 0;
 uint32_t g_dropImu = 0;
+uint32_t g_dropTemp = 0;
 uint32_t g_overwriteEcg = 0;
 uint32_t g_overwritePpg = 0;
 uint32_t g_overwriteImu = 0;
+uint32_t g_overwriteTemp = 0;
 uint32_t g_wifiReconnectCount = 0;
 uint32_t g_mqttPublishFailCount = 0;
 uint32_t g_lastPublishLatencyMs = 0;
@@ -50,10 +55,12 @@ uint32_t g_imuPressureDecimateCounter = 0;
 constexpr uint32_t kEcgMqttQueueLen = 1024;
 constexpr uint32_t kPpgMqttQueueLen = 256;
 constexpr uint32_t kImuMqttQueueLen = 256;
+constexpr uint32_t kTempMqttQueueLen = 16;
 
 constexpr size_t kEcgBatchMax = 40;
 constexpr size_t kPpgBatchMax = 20;
 constexpr size_t kImuBatchMax = 20;
+constexpr size_t kTempBatchMax = 4;
 constexpr TickType_t kMqttTaskPeriodTicks = pdMS_TO_TICKS(20);
 constexpr uint8_t kPublishBurstsPerLoop = 2;
 constexpr uint32_t kWifiConnectTimeoutMs = 20000;
@@ -84,6 +91,8 @@ char g_topicWaveBinPpg[96] = {};
 char g_topicWaveBinImu[96] = {};
 char g_topicWaveBinEcgFiltered[96] = {};
 char g_topicWaveBinPpgFiltered[96] = {};
+char g_topicTemperature[96] = {};
+char g_topicWaveBinTemp[96] = {};
 
 template <typename T>
 bool enqueueDroppingOldest(QueueHandle_t queue, const T& sample, bool* overwrote) {
@@ -245,6 +254,8 @@ void buildTopics() {
   snprintf(g_topicWaveBinImu, sizeof(g_topicWaveBinImu), "%s/%s/waveform_bin/imu", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWaveBinEcgFiltered, sizeof(g_topicWaveBinEcgFiltered), "%s/%s/waveform_bin/ecg_filtered", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
   snprintf(g_topicWaveBinPpgFiltered, sizeof(g_topicWaveBinPpgFiltered), "%s/%s/waveform_bin/ppg_filtered", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
+  snprintf(g_topicTemperature, sizeof(g_topicTemperature), "%s/%s/temperature", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
+  snprintf(g_topicWaveBinTemp, sizeof(g_topicWaveBinTemp), "%s/%s/waveform_bin/temp", MQTT_TOPIC_ROOT, MQTT_TOPIC_DEVICE_ID);
 }
 
 bool textContains(const char* text, const char* needle) {
@@ -297,9 +308,11 @@ void resetCounters() {
   g_dropEcg = 0;
   g_dropPpg = 0;
   g_dropImu = 0;
+  g_dropTemp = 0;
   g_overwriteEcg = 0;
   g_overwritePpg = 0;
   g_overwriteImu = 0;
+  g_overwriteTemp = 0;
   g_mqttPublishFailCount = 0;
   g_wifiReconnectCount = 0;
   g_ppgPressureDecimateCounter = 0;
@@ -327,6 +340,8 @@ void handleControlPayload(const char* payload) {
                   (textContains(payload, "\"imu\"") ||
                    textContains(payload, "\"imu_ax\"") ||
                    textContains(payload, "\"imu_gx\""));
+    g_enableTemp = textContains(payload, "\"temp\"") ||
+                   textContains(payload, "\"temperature\"");
     data_logger::logStatus("[NET] MQTT control set_channels.");
     return;
   }
@@ -601,17 +616,19 @@ void publishDiagTelemetry() {
   const uint32_t qEcg = (g_ecgMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_ecgMqttQueue));
   const uint32_t qPpg = (g_ppgMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_ppgMqttQueue));
   const uint32_t qImu = (g_imuMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_imuMqttQueue));
+  const uint32_t qTemp = (g_tempMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_tempMqttQueue));
   const signal_dsp::DspMetrics dsp = signal_dsp::metrics();
 
   char payload[kMqttPayloadBuffer];
   snprintf(payload, sizeof(payload),
            "{\"deviceId\":\"%s\",\"clientId\":\"%s\",\"sessionId\":\"%s\",\"seq\":%lu,\"timestampMs\":%lu,"
            "\"ecgQueueLen\":%lu,\"ppgQueueLen\":%lu,\"imuQueueLen\":%lu,"
-           "\"ecgDropCount\":%lu,\"ppgDropCount\":%lu,\"imuDropCount\":%lu,"
+           "\"tempQueueLen\":%lu,"
+           "\"ecgDropCount\":%lu,\"ppgDropCount\":%lu,\"imuDropCount\":%lu,\"tempDropCount\":%lu,"
            "\"mqttPublishFailCount\":%lu,\"wifiReconnectCount\":%lu,"
            "\"rssi\":%ld,\"heapFree\":%lu,\"lastPublishLatencyMs\":%lu,"
            "\"dsp\":{\"enabled\":%s,\"version\":%lu,\"motion\":%.3f,\"ecgQuality\":%.3f,\"ppgQuality\":%.3f,\"ecgBpm\":%.2f,\"ppgBpm\":%.2f},"
-           "\"ow\":{\"ecg\":%lu,\"ppg\":%lu,\"imu\":%lu}}",
+           "\"ow\":{\"ecg\":%lu,\"ppg\":%lu,\"imu\":%lu,\"temp\":%lu}}",
            MQTT_TOPIC_DEVICE_ID,
            g_clientId,
            g_sessionId,
@@ -620,9 +637,11 @@ void publishDiagTelemetry() {
            static_cast<unsigned long>(qEcg),
            static_cast<unsigned long>(qPpg),
            static_cast<unsigned long>(qImu),
+           static_cast<unsigned long>(qTemp),
            static_cast<unsigned long>(g_dropEcg),
            static_cast<unsigned long>(g_dropPpg),
            static_cast<unsigned long>(g_dropImu),
+           static_cast<unsigned long>(g_dropTemp),
            static_cast<unsigned long>(g_mqttPublishFailCount),
            static_cast<unsigned long>(g_wifiReconnectCount),
            static_cast<long>(WiFi.RSSI()),
@@ -637,7 +656,8 @@ void publishDiagTelemetry() {
            static_cast<double>(dsp.ppgPulseRateBpm),
            static_cast<unsigned long>(g_overwriteEcg),
            static_cast<unsigned long>(g_overwritePpg),
-           static_cast<unsigned long>(g_overwriteImu));
+           static_cast<unsigned long>(g_overwriteImu),
+           static_cast<unsigned long>(g_overwriteTemp));
 
   (void)publishTextTracked(g_topicMetrics, payload, false);
 }
@@ -887,6 +907,83 @@ void publishImuSamples() {
   }
 }
 
+void publishTemperatureSamples() {
+  if (g_tempMqttQueue == nullptr) {
+    return;
+  }
+
+  TemperatureSample batch[kTempBatchMax];
+  const size_t n = dequeueBatch(g_tempMqttQueue, batch, kTempBatchMax);
+  if (n == 0) {
+    return;
+  }
+
+  const uint32_t seq = g_tempSeq++;
+
+  if (kJsonPayloadEnabled) {
+    char payload[kMqttPayloadBuffer];
+    int w = snprintf(payload, sizeof(payload),
+                     "{\"deviceId\":\"%s\",\"sessionId\":\"%s\",\"seq\":%lu,\"timestampMs\":%llu,\"sampleRate\":%lu,\"unit\":\"C\",\"samples\":[",
+                     MQTT_TOPIC_DEVICE_ID,
+                     g_sessionId,
+                     static_cast<unsigned long>(seq),
+                     static_cast<unsigned long long>(tsUsToMs(batch[0].ts_us)),
+                     static_cast<unsigned long>(M601_SAMPLE_RATE_HZ));
+    if (w > 0 && static_cast<size_t>(w) < sizeof(payload)) {
+      size_t off = static_cast<size_t>(w);
+      bool ok = true;
+      for (size_t i = 0; i < n; ++i) {
+        w = snprintf(payload + off, sizeof(payload) - off,
+                     "%s{\"tsUs\":%llu,\"raw\":%d,\"tempC\":%.4f,\"flags\":%u}",
+                     (i == 0) ? "" : ",",
+                     static_cast<unsigned long long>(batch[i].ts_us),
+                     static_cast<int>(batch[i].raw),
+                     static_cast<double>(batch[i].temp_c),
+                     static_cast<unsigned>(batch[i].flags));
+        if (w <= 0 || static_cast<size_t>(w) >= (sizeof(payload) - off)) {
+          ok = false;
+          break;
+        }
+        off += static_cast<size_t>(w);
+      }
+      if (ok && off + 3 < sizeof(payload)) {
+        payload[off++] = ']';
+        payload[off++] = '}';
+        payload[off] = '\0';
+        if (!publishTextTracked(g_topicTemperature, payload, false)) {
+          data_logger::logStatus("[NET] MQTT temperature publish failed.");
+        }
+      }
+    }
+  }
+
+  if (kBinaryPayloadEnabled) {
+    uint8_t payload[kMqttPayloadBuffer] = {};
+    const uint16_t payloadLen = static_cast<uint16_t>(n * 15U);
+    const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'T', seq, static_cast<uint16_t>(n), payloadLen);
+    size_t off = payloadOffset;
+
+    for (size_t i = 0; i < n; ++i) {
+      if (off + 15 > sizeof(payload)) {
+        break;
+      }
+      appendU64Le(&payload[off], batch[i].ts_us);
+      off += 8;
+      appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].raw));
+      off += 2;
+      static_assert(sizeof(float) == 4, "ESP32 float must be 32-bit");
+      memcpy(&payload[off], &batch[i].temp_c, sizeof(float));
+      off += 4;
+      payload[off++] = batch[i].flags;
+    }
+    finishBio2Frame(payload, payloadOffset, off - payloadOffset);
+
+    if (!publishBinaryTracked(g_topicWaveBinTemp, payload, off, false)) {
+      data_logger::logStatus("[NET] MQTT temperature BIN publish failed.");
+    }
+  }
+}
+
 }  // namespace
 
 namespace cloud_mqtt {
@@ -925,6 +1022,13 @@ void begin() {
     g_imuMqttQueue = xQueueCreate(kImuMqttQueueLen, sizeof(ImuSample));
     if (g_imuMqttQueue == nullptr) {
       data_logger::logStatus("[NET] IMU MQTT queue create failed.");
+    }
+  }
+
+  if (g_tempMqttQueue == nullptr) {
+    g_tempMqttQueue = xQueueCreate(kTempMqttQueueLen, sizeof(TemperatureSample));
+    if (g_tempMqttQueue == nullptr) {
+      data_logger::logStatus("[NET] temperature MQTT queue create failed.");
     }
   }
 
@@ -1037,6 +1141,26 @@ bool enqueueImu(const ImuSample& sample) {
   return false;
 }
 
+bool enqueueTemperature(const TemperatureSample& sample) {
+  if (!g_enableTemp) {
+    return true;
+  }
+  if (g_tempMqttQueue == nullptr) {
+    return false;
+  }
+
+  bool overwrote = false;
+  if (enqueueDroppingOldest(g_tempMqttQueue, sample, &overwrote)) {
+    if (overwrote) {
+      ++g_overwriteTemp;
+      ++g_dropTemp;
+    }
+    return true;
+  }
+  ++g_dropTemp;
+  return false;
+}
+
 void taskLoop() {
   TickType_t lastWake = xTaskGetTickCount();
 
@@ -1047,6 +1171,7 @@ void taskLoop() {
         publishEcgSamples();
         publishPpgSamples();
         publishImuSamples();
+        publishTemperatureSamples();
       }
       g_mqttClient.loop();
     } else {

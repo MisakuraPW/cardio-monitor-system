@@ -28,21 +28,30 @@ constexpr uint32_t BMI_SAMPLE_RATE_HZ = 200;
 constexpr uint32_t BMI_SAMPLE_PERIOD_US = 1000000UL / BMI_SAMPLE_RATE_HZ;
 constexpr uint32_t BMI_SPI_CLOCK_HZ = 1000000;
 
+// M601 - 1-Wire digital temperature sensor
+constexpr gpio_num_t M601_DQ_PIN = GPIO_NUM_14;
+constexpr uint32_t M601_SAMPLE_RATE_HZ = 1;
+constexpr uint32_t M601_SAMPLE_PERIOD_MS = 1000UL / M601_SAMPLE_RATE_HZ;
+constexpr uint32_t M601_CONVERSION_TIMEOUT_MS = 30;
+
 // Queues
 constexpr uint32_t ECG_QUEUE_LEN = 1024;
 constexpr uint32_t PPG_QUEUE_LEN = 512;
 constexpr uint32_t IMU_QUEUE_LEN = 512;
+constexpr uint32_t TEMP_QUEUE_LEN = 16;
 
 // Task stack sizes
 constexpr uint32_t ECG_TASK_STACK = 4096;
 constexpr uint32_t PPG_TASK_STACK = 6144;
 constexpr uint32_t IMU_TASK_STACK = 6144;
+constexpr uint32_t TEMP_TASK_STACK = 4096;
 constexpr uint32_t LOGGER_TASK_STACK = 6144;
 
 // Task priorities
 constexpr UBaseType_t ECG_TASK_PRIORITY = 4;
 constexpr UBaseType_t PPG_TASK_PRIORITY = 3;
 constexpr UBaseType_t IMU_TASK_PRIORITY = 3;
+constexpr UBaseType_t TEMP_TASK_PRIORITY = 2;
 constexpr UBaseType_t LOGGER_TASK_PRIORITY = 2;  // packetizer/logger
 constexpr UBaseType_t UART_TASK_PRIORITY = 1;
 constexpr UBaseType_t MQTT_TASK_PRIORITY = 3;
@@ -56,6 +65,7 @@ constexpr UBaseType_t BLE_TASK_PRIORITY = 3;
 constexpr uint32_t BLE_ECG_QUEUE_LEN = 2048;
 constexpr uint32_t BLE_PPG_QUEUE_LEN = 512;
 constexpr uint32_t BLE_IMU_QUEUE_LEN = 512;
+constexpr uint32_t BLE_TEMP_QUEUE_LEN = 16;
 constexpr uint16_t BLE_MTU_TARGET = 512;
 constexpr uint16_t BLE_NOTIFY_PAYLOAD_FALLBACK = 20;
 constexpr const char* BLE_SERVICE_UUID = "c0ad0001-8d2b-4d6f-9a1c-1c8a52f0a001";
@@ -72,7 +82,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_BLE_OUTPUT
-#define ENABLE_BLE_OUTPUT 01
+#define ENABLE_BLE_OUTPUT 0
   // 1 = send samples via BLE, 0 = disable BLE output
 #endif
 
@@ -90,6 +100,10 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 
 #ifndef ENABLE_IMU_OUTPUT
 #define ENABLE_IMU_OUTPUT 1
+#endif
+
+#ifndef ENABLE_TEMP_OUTPUT
+#define ENABLE_TEMP_OUTPUT 1
 #endif
 
 // Logger format:

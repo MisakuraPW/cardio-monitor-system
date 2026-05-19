@@ -6,6 +6,7 @@ enum class SensorType : uint8_t {
   Ecg = 0,
   Ppg = 1,
   Imu = 2,
+  Temperature = 3,
 };
 
 struct EcgSample {
@@ -36,4 +37,11 @@ struct ImuSample {
   int16_t gyr_x;
   int16_t gyr_y;
   int16_t gyr_z;
+};
+
+struct TemperatureSample {
+  uint64_t ts_us;
+  int16_t raw;
+  float temp_c;
+  uint8_t flags;
 };

@@ -38,6 +38,7 @@ Each sample is sent as one binary frame.
   - `0x45` (`'E'`) for ECG
   - `0x50` (`'P'`) for PPG
   - `0x49` (`'I'`) for IMU
+  - `0x54` (`'T'`) for M601 temperature
 - Len: payload length in bytes
 - Checksum: XOR of `Type`, `Len`, and all payload bytes
 
@@ -83,6 +84,20 @@ offset  size  type      field
 ```
 
 Total frame size: `2 + 1 + 1 + 20 + 1 = 25 bytes`
+
+### 3.4 Temperature (`Type='T'`, `Len=15`)
+
+```text
+offset  size  type      field
+0       8     uint64_t  ts_us
+8       2     int16_t   raw
+10      4     float     temp_c
+14      1     uint8_t   flags
+```
+
+`raw` is the signed 16-bit M601 temperature register value. `temp_c` is calculated as `raw / 256.0f + 40.0f`.
+
+Total frame size: `2 + 1 + 1 + 15 + 1 = 20 bytes`
 
 ## 4. Parser Recommendations
 

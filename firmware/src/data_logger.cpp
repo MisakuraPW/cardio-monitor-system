@@ -33,6 +33,13 @@ struct ImuPayloadBin {
   int16_t gyr_y;
   int16_t gyr_z;
 };
+
+struct TemperaturePayloadBin {
+  uint64_t ts_us;
+  int16_t raw;
+  float temp_c;
+  uint8_t flags;
+};
 #pragma pack(pop)
 
 uint8_t checksum8(const uint8_t type, const uint8_t len, const uint8_t* payload) {
@@ -130,6 +137,20 @@ void logImu(const ImuSample& sample) {
   ImuPayloadBin payload{sample.ts_us, sample.acc_x, sample.acc_y, sample.acc_z,
                         sample.gyr_x, sample.gyr_y, sample.gyr_z};
   writeBinaryFrame('I', &payload, static_cast<uint8_t>(sizeof(payload)));
+#endif
+#else
+  (void)sample;
+#endif
+}
+
+void logTemperature(const TemperatureSample& sample) {
+#if ENABLE_SERIAL_LOGGER && ENABLE_TEMP_OUTPUT
+#if LOGGER_OUTPUT_MODE == 1
+  Serial.printf("T,%llu,%d,%.4f,%u\n", sample.ts_us, sample.raw,
+                static_cast<double>(sample.temp_c), sample.flags);
+#else
+  TemperaturePayloadBin payload{sample.ts_us, sample.raw, sample.temp_c, sample.flags};
+  writeBinaryFrame('T', &payload, static_cast<uint8_t>(sizeof(payload)));
 #endif
 #else
   (void)sample;
