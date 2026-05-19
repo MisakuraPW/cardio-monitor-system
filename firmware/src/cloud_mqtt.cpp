@@ -29,6 +29,8 @@ uint32_t g_lastDiagPublishMs = 0;
 bool g_wifiConnectInProgress = false;
 uint32_t g_wifiConnectStartMs = 0;
 constexpr bool kDemoWifiMode = true;
+constexpr bool kDemoPublishRawWaveforms = !kDemoWifiMode;
+constexpr bool kDemoPublishFilteredWaveforms = true;
 bool g_enableEcg = true;
 bool g_enablePpg = true;
 bool g_enableImu = !kDemoWifiMode;
@@ -314,13 +316,17 @@ void handleControlPayload(const char* payload) {
     return;
   }
   if (textContains(payload, "set_channels")) {
-    g_enableEcg = textContains(payload, "\"ecg\"");
+    g_enableEcg = textContains(payload, "\"ecg\"") ||
+                  textContains(payload, "\"ecg_filtered\"");
     g_enablePpg = textContains(payload, "\"ppg\"") ||
                   textContains(payload, "\"ppg_ir\"") ||
-                  textContains(payload, "\"ppg_red\"");
-    g_enableImu = textContains(payload, "\"imu\"") ||
-                  textContains(payload, "\"imu_ax\"") ||
-                  textContains(payload, "\"imu_gx\"");
+                  textContains(payload, "\"ppg_red\"") ||
+                  textContains(payload, "\"ppg_ir_filtered\"") ||
+                  textContains(payload, "\"ppg_red_filtered\"");
+    g_enableImu = !kDemoWifiMode &&
+                  (textContains(payload, "\"imu\"") ||
+                   textContains(payload, "\"imu_ax\"") ||
+                   textContains(payload, "\"imu_gx\""));
     data_logger::logStatus("[NET] MQTT control set_channels.");
     return;
   }
@@ -649,7 +655,7 @@ void publishEcgSamples() {
 
   const uint32_t seq = g_ecgSeq++;
 
-  if (kJsonPayloadEnabled) {
+  if (kJsonPayloadEnabled && kDemoPublishRawWaveforms) {
     uint16_t values[kEcgBatchMax] = {};
     for (size_t i = 0; i < n; ++i) {
       values[i] = batch[i].raw_adc;
@@ -666,7 +672,7 @@ void publishEcgSamples() {
     }
   }
 
-  if (kBinaryPayloadEnabled) {
+  if (kBinaryPayloadEnabled && kDemoPublishRawWaveforms) {
     uint8_t payload[kMqttPayloadBuffer] = {};
     const uint16_t payloadLen = static_cast<uint16_t>(n * 12U);
     const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'E', seq, static_cast<uint16_t>(n), payloadLen);
@@ -689,8 +695,12 @@ void publishEcgSamples() {
       data_logger::logStatus("[NET] MQTT ECG BIN publish failed.");
     }
 
+  }
+
+  if (kBinaryPayloadEnabled && kDemoPublishFilteredWaveforms) {
     uint8_t filteredPayload[kMqttPayloadBuffer] = {};
-    const size_t filteredOffset = beginBio2Frame(filteredPayload, sizeof(filteredPayload), 'F', seq, static_cast<uint16_t>(n), payloadLen);
+    const uint16_t filteredPayloadLen = static_cast<uint16_t>(n * 12U);
+    const size_t filteredOffset = beginBio2Frame(filteredPayload, sizeof(filteredPayload), 'F', seq, static_cast<uint16_t>(n), filteredPayloadLen);
     size_t filteredOff = filteredOffset;
     for (size_t i = 0; i < n; ++i) {
       if (filteredOff + 12 > sizeof(filteredPayload)) {
@@ -723,7 +733,7 @@ void publishPpgSamples() {
 
   const uint32_t seq = g_ppgSeq++;
 
-  if (kJsonPayloadEnabled) {
+  if (kJsonPayloadEnabled && kDemoPublishRawWaveforms) {
     uint32_t valuesIr[kPpgBatchMax] = {};
     uint32_t valuesRed[kPpgBatchMax] = {};
     for (size_t i = 0; i < n; ++i) {
@@ -751,7 +761,7 @@ void publishPpgSamples() {
     }
   }
 
-  if (kBinaryPayloadEnabled) {
+  if (kBinaryPayloadEnabled && kDemoPublishRawWaveforms) {
     uint8_t payload[kMqttPayloadBuffer] = {};
     const uint16_t payloadLen = static_cast<uint16_t>(n * 16U);
     const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'P', seq, static_cast<uint16_t>(n), payloadLen);
@@ -774,8 +784,12 @@ void publishPpgSamples() {
       data_logger::logStatus("[NET] MQTT PPG BIN publish failed.");
     }
 
+  }
+
+  if (kBinaryPayloadEnabled && kDemoPublishFilteredWaveforms) {
     uint8_t filteredPayload[kMqttPayloadBuffer] = {};
-    const size_t filteredOffset = beginBio2Frame(filteredPayload, sizeof(filteredPayload), 'Q', seq, static_cast<uint16_t>(n), payloadLen);
+    const uint16_t filteredPayloadLen = static_cast<uint16_t>(n * 16U);
+    const size_t filteredOffset = beginBio2Frame(filteredPayload, sizeof(filteredPayload), 'Q', seq, static_cast<uint16_t>(n), filteredPayloadLen);
     size_t filteredOff = filteredOffset;
     for (size_t i = 0; i < n; ++i) {
       if (filteredOff + 16 > sizeof(filteredPayload)) {
