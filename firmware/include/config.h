@@ -12,7 +12,7 @@ constexpr uint32_t ECG_SAMPLE_PERIOD_US = 1000000UL / ECG_SAMPLE_RATE_HZ;
 // MAX30102 - I2C
 constexpr gpio_num_t PPG_I2C_SDA_PIN = GPIO_NUM_21;
 constexpr gpio_num_t PPG_I2C_SCL_PIN = GPIO_NUM_22;
-constexpr gpio_num_t PPG_INT_PIN = GPIO_NUM_25;
+constexpr gpio_num_t PPG_INT_PIN = GPIO_NUM_4;
 constexpr uint32_t PPG_SAMPLE_RATE_HZ = 200;
 constexpr uint32_t PPG_SAMPLE_PERIOD_US = 1000000UL / PPG_SAMPLE_RATE_HZ;
 constexpr uint32_t PPG_I2C_CLOCK_HZ = 400000;
@@ -22,8 +22,8 @@ constexpr gpio_num_t BMI_SPI_SCK_PIN = GPIO_NUM_18;
 constexpr gpio_num_t BMI_SPI_MISO_PIN = GPIO_NUM_19;
 constexpr gpio_num_t BMI_SPI_MOSI_PIN = GPIO_NUM_23;
 constexpr gpio_num_t BMI_SPI_CS_PIN = GPIO_NUM_5;
-constexpr gpio_num_t BMI_INT1_PIN = GPIO_NUM_26;
-constexpr gpio_num_t BMI_INT2_PIN = GPIO_NUM_27;
+constexpr gpio_num_t BMI_INT1_PIN = GPIO_NUM_16;
+constexpr gpio_num_t BMI_INT2_PIN = GPIO_NUM_17;
 constexpr uint32_t BMI_SAMPLE_RATE_HZ = 200;
 constexpr uint32_t BMI_SAMPLE_PERIOD_US = 1000000UL / BMI_SAMPLE_RATE_HZ;
 constexpr uint32_t BMI_SPI_CLOCK_HZ = 1000000;
@@ -33,6 +33,10 @@ constexpr gpio_num_t M601_DQ_PIN = GPIO_NUM_14;
 constexpr uint32_t M601_SAMPLE_RATE_HZ = 1;
 constexpr uint32_t M601_SAMPLE_PERIOD_MS = 1000UL / M601_SAMPLE_RATE_HZ;
 constexpr uint32_t M601_CONVERSION_TIMEOUT_MS = 30;
+
+// Output mode switch
+constexpr gpio_num_t OUTPUT_MODE_SWITCH_PIN = GPIO_NUM_27;
+constexpr uint32_t OUTPUT_MODE_SWITCH_DEBOUNCE_MS = 50;
 
 // Queues
 constexpr uint32_t ECG_QUEUE_LEN = 1024;
@@ -46,6 +50,7 @@ constexpr uint32_t PPG_TASK_STACK = 6144;
 constexpr uint32_t IMU_TASK_STACK = 6144;
 constexpr uint32_t TEMP_TASK_STACK = 4096;
 constexpr uint32_t LOGGER_TASK_STACK = 6144;
+constexpr uint32_t OUTPUT_MODE_TASK_STACK = 8192;
 
 // Task priorities
 constexpr UBaseType_t ECG_TASK_PRIORITY = 4;
@@ -82,7 +87,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_BLE_OUTPUT
-#define ENABLE_BLE_OUTPUT 0
+#define ENABLE_BLE_OUTPUT 1
   // 1 = send samples via BLE, 0 = disable BLE output
 #endif
 

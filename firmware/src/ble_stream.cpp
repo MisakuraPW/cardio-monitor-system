@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string>
 #include <string.h>
+#include <vector>
 
 #include "config.h"
 #include "data_logger.h"
@@ -22,6 +23,9 @@ QueueHandle_t g_tempBleQueue = nullptr;
 
 bool g_connected = false;
 bool g_subscribed = false;
+bool g_active = false;
+bool g_initialized = false;
+bool g_advertising = false;
 bool g_enableEcg = true;
 bool g_enablePpg = true;
 bool g_enableImu = true;
@@ -51,6 +55,48 @@ constexpr TickType_t kNotifyRetryDelay = pdMS_TO_TICKS(5);
 
 size_t minSize(const size_t a, const size_t b) { return (a < b) ? a : b; }
 
+void startAdvertising() {
+  if (!g_initialized) {
+    return;
+  }
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  if (advertising != nullptr) {
+    g_advertising = advertising->start();
+  }
+}
+
+void stopAdvertising() {
+  if (!g_initialized) {
+    return;
+  }
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  if (advertising != nullptr) {
+    advertising->stop();
+  }
+  g_advertising = false;
+}
+
+bool isAdvertising() {
+  if (!g_initialized) {
+    return false;
+  }
+  NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
+  return advertising != nullptr && advertising->isAdvertising();
+}
+
+void disconnectPeers() {
+  if (!g_initialized || g_server == nullptr) {
+    return;
+  }
+
+  const std::vector<uint16_t> peers = g_server->getPeerDevices();
+  for (uint16_t connId : peers) {
+    (void)g_server->disconnect(connId);
+  }
+  g_connected = false;
+  g_subscribed = false;
+}
+
 void updateNotifyPayloadMax(const uint16_t mtu) {
   g_mtu = mtu;
   if (mtu >= 23) {
@@ -72,8 +118,9 @@ class BleServerCallbacks : public NimBLEServerCallbacks {
   void onDisconnect(NimBLEServer* server) override {
     g_connected = false;
     g_subscribed = false;
-    if (server != nullptr) {
-      server->startAdvertising();
+    g_advertising = false;
+    if (g_active && server != nullptr) {
+      startAdvertising();
     }
   }
 
@@ -320,7 +367,7 @@ size_t dequeueBatch(QueueHandle_t queue, T* batch, const size_t batchMax) {
 }
 
 bool sendNotifyPayload(const uint8_t* payload, const size_t len) {
-  if (!g_connected || !g_subscribed || g_notifyChar == nullptr || payload == nullptr) {
+  if (!g_active || !g_connected || !g_subscribed || g_notifyChar == nullptr || payload == nullptr) {
     return false;
   }
   if (len == 0) {
@@ -492,6 +539,10 @@ void publishTemperatureSamples() {
 namespace ble_stream {
 
 void begin() {
+  if (g_initialized) {
+    return;
+  }
+
   NimBLEDevice::init(BLE_DEVICE_NAME);
   (void)NimBLEDevice::setMTU(BLE_MTU_TARGET);
 
@@ -508,7 +559,6 @@ void begin() {
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
   advertising->addServiceUUID(service->getUUID());
   advertising->setScanResponse(true);
-  advertising->start();
 
   if (g_ecgBleQueue == nullptr) {
     g_ecgBleQueue = xQueueCreate(BLE_ECG_QUEUE_LEN, sizeof(EcgSample));
@@ -524,10 +574,45 @@ void begin() {
   }
 
   updateNotifyPayloadMax(g_mtu);
+  g_initialized = true;
   data_logger::logStatus("[BLE] NimBLE init done.");
 }
 
+void setActive(const bool active) {
+  if (g_active == active) {
+    return;
+  }
+
+  g_active = active;
+  if (active) {
+    begin();
+    startAdvertising();
+    data_logger::logStatus("[BLE] output active.");
+  } else {
+    g_active = false;
+    g_subscribed = false;
+    stopAdvertising();
+    disconnectPeers();
+    if (g_ecgBleQueue != nullptr) {
+      xQueueReset(g_ecgBleQueue);
+    }
+    if (g_ppgBleQueue != nullptr) {
+      xQueueReset(g_ppgBleQueue);
+    }
+    if (g_imuBleQueue != nullptr) {
+      xQueueReset(g_imuBleQueue);
+    }
+    if (g_tempBleQueue != nullptr) {
+      xQueueReset(g_tempBleQueue);
+    }
+    data_logger::logStatus("[BLE] output inactive.");
+  }
+}
+
 bool enqueueEcg(const EcgSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (g_ecgBleQueue == nullptr) {
     return false;
   }
@@ -543,6 +628,9 @@ bool enqueueEcg(const EcgSample& sample) {
 }
 
 bool enqueuePpg(const PpgSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (g_ppgBleQueue == nullptr) {
     return false;
   }
@@ -558,6 +646,9 @@ bool enqueuePpg(const PpgSample& sample) {
 }
 
 bool enqueueImu(const ImuSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (g_imuBleQueue == nullptr) {
     return false;
   }
@@ -573,6 +664,9 @@ bool enqueueImu(const ImuSample& sample) {
 }
 
 bool enqueueTemperature(const TemperatureSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (g_tempBleQueue == nullptr) {
     return false;
   }
@@ -591,7 +685,11 @@ void taskLoop() {
   TickType_t lastWake = xTaskGetTickCount();
 
   for (;;) {
-    if (g_connected && g_subscribed) {
+    if (g_active && !g_connected && (!g_advertising || !isAdvertising())) {
+      startAdvertising();
+    }
+
+    if (g_active && g_connected && g_subscribed) {
       publishEcgSamples();
       vTaskDelay(pdMS_TO_TICKS(2));  // Small gap between sensor types
       publishPpgSamples();

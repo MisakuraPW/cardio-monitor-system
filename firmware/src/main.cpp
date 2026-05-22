@@ -32,6 +32,8 @@ QueueHandle_t g_uartTxQueue = nullptr;
 bool g_ppgOnline = false;
 bool g_imuOnline = false;
 bool g_tempOnline = false;
+bool g_mqttStarted = false;
+bool g_bleStarted = false;
 
 TickType_t g_ppgLastSampleTick = 0;
 TickType_t g_imuLastSampleTick = 0;
@@ -43,6 +45,8 @@ constexpr TickType_t kTempPeriodTicks = pdMS_TO_TICKS(M601_SAMPLE_PERIOD_MS);
 constexpr TickType_t kEcgPeriodTicks = pdMS_TO_TICKS(2);
 constexpr TickType_t kSensorStallTimeout = pdMS_TO_TICKS(2000);
 constexpr TickType_t kReinitRetryInterval = pdMS_TO_TICKS(1000);
+constexpr TickType_t kSwitchDebounceTicks = pdMS_TO_TICKS(OUTPUT_MODE_SWITCH_DEBOUNCE_MS);
+constexpr TickType_t kRadioModeSwitchDelayTicks = pdMS_TO_TICKS(500);
 constexpr uint8_t kEcgMaxSamplesPerLoop = 2;
 constexpr uint32_t kPacketizerYieldEveryLoops = 20;
 constexpr size_t kPacketizerEcgBatch = 8;
@@ -54,6 +58,19 @@ constexpr bool kEnableWifiOutput = (ENABLE_WIFI_OUTPUT == 1);
 constexpr bool kEnableBleOutput = (ENABLE_BLE_OUTPUT == 1);
 
 uint32_t g_ecgDropCount = 0;
+bool g_useWifiOutput = false;
+bool g_useBleOutput = false;
+volatile bool g_outputModeIrqPending = true;
+TaskHandle_t g_mqttTaskHandle = nullptr;
+TaskHandle_t g_bleTaskHandle = nullptr;
+
+enum class OutputMode : uint8_t {
+  None,
+  Wifi,
+  Ble,
+};
+
+OutputMode g_outputMode = OutputMode::None;
 
 // LOGGER_OUTPUT_MODE supports only: 1 = compact text, 2 = binary.
 #if LOGGER_OUTPUT_MODE == 1
@@ -148,10 +165,10 @@ struct TemperaturePayloadBin {
 void emitEcg(const EcgSample& s) {
   EcgSample processed = s;
   signal_dsp::processEcg(processed);
-  if (kEnableWifiOutput) {
+  if (g_useWifiOutput) {
     (void)cloud_mqtt::enqueueEcg(processed);
   }
-  if (kEnableBleOutput) {
+  if (g_useBleOutput) {
     (void)ble_stream::enqueueEcg(processed);
   }
   if (kEnableUartStream && kOutBinary) {
@@ -177,10 +194,10 @@ void emitEcg(const EcgSample& s) {
 void emitPpg(const PpgSample& s) {
   PpgSample processed = s;
   signal_dsp::processPpg(processed);
-  if (kEnableWifiOutput) {
+  if (g_useWifiOutput) {
     (void)cloud_mqtt::enqueuePpg(processed);
   }
-  if (kEnableBleOutput) {
+  if (g_useBleOutput) {
     (void)ble_stream::enqueuePpg(processed);
   }
   if (kEnableUartStream && kOutBinary) {
@@ -203,6 +220,12 @@ void emitPpg(const PpgSample& s) {
 
 void emitImu(const ImuSample& s) {
   signal_dsp::updateImu(s);
+  if (g_useWifiOutput) {
+    (void)cloud_mqtt::enqueueImu(s);
+  }
+  if (g_useBleOutput) {
+    (void)ble_stream::enqueueImu(s);
+  }
   if (kEnableUartStream && kOutBinary) {
     const ImuPayloadBin p{ s.ts_us, s.acc_x, s.acc_y, s.acc_z, s.gyr_x, s.gyr_y, s.gyr_z };
     (void)pushBinaryFrame('I', &p, static_cast<uint8_t>(sizeof(p)));
@@ -222,10 +245,10 @@ void emitImu(const ImuSample& s) {
 }
 
 void emitTemperature(const TemperatureSample& s) {
-  if (kEnableWifiOutput) {
+  if (g_useWifiOutput) {
     (void)cloud_mqtt::enqueueTemperature(s);
   }
-  if (kEnableBleOutput) {
+  if (g_useBleOutput) {
     (void)ble_stream::enqueueTemperature(s);
   }
   if (kEnableUartStream && kOutBinary) {
@@ -474,6 +497,106 @@ void bleTask(void* /*pvParameters*/) {
   ble_stream::taskLoop();
 }
 
+void IRAM_ATTR outputModeSwitchIsr() {
+  g_outputModeIrqPending = true;
+}
+
+void configureOutputModeSwitch() {
+  pinMode(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN), INPUT);
+  attachInterrupt(digitalPinToInterrupt(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN)),
+                  outputModeSwitchIsr,
+                  CHANGE);
+  g_outputModeIrqPending = true;
+}
+
+OutputMode readRequestedOutputMode() {
+  return digitalRead(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN)) == HIGH
+      ? OutputMode::Wifi
+      : OutputMode::Ble;
+}
+
+bool startMqttTaskIfNeeded() {
+  if (!kEnableWifiOutput) {
+    return false;
+  }
+  if (!g_mqttStarted) {
+    cloud_mqtt::begin();
+    if (xTaskCreatePinnedToCore(mqttTask, "mqtt_task", 6144, nullptr,
+                                MQTT_TASK_PRIORITY, &g_mqttTaskHandle, 0) != pdPASS) {
+      data_logger::logStatus(F("MQTT task creation failed."));
+      g_mqttTaskHandle = nullptr;
+      return false;
+    }
+    g_mqttStarted = true;
+  }
+  return true;
+}
+
+void applyOutputMode(const OutputMode requestedMode) {
+  if (requestedMode == g_outputMode) {
+    return;
+  }
+
+  g_useWifiOutput = false;
+  g_useBleOutput = false;
+  bool stoppedRadio = false;
+  if (g_mqttStarted) {
+    cloud_mqtt::setActive(false);
+    stoppedRadio = true;
+  }
+  if (g_bleStarted) {
+    ble_stream::setActive(false);
+    stoppedRadio = true;
+  }
+  if (stoppedRadio) {
+    vTaskDelay(kRadioModeSwitchDelayTicks);
+  }
+
+  if (requestedMode == OutputMode::Wifi) {
+    if (startMqttTaskIfNeeded()) {
+      cloud_mqtt::setActive(true);
+      g_useWifiOutput = true;
+      g_outputMode = OutputMode::Wifi;
+      data_logger::logStatus(F("GPIO27 high: WiFi/MQTT output selected."));
+      return;
+    }
+    data_logger::logStatus(F("GPIO27 high: WiFi selected, but WiFi output is unavailable."));
+  } else if (requestedMode == OutputMode::Ble) {
+    if (kEnableBleOutput && g_bleStarted) {
+      ble_stream::setActive(true);
+      g_useBleOutput = true;
+      g_outputMode = OutputMode::Ble;
+      data_logger::logStatus(F("GPIO27 low: BLE output selected."));
+      return;
+    }
+    data_logger::logStatus(F("GPIO27 low: BLE selected, but BLE output is unavailable."));
+  }
+
+  g_outputMode = OutputMode::None;
+}
+
+void outputModeControlTask(void* /*pvParameters*/) {
+  TickType_t lastHandledTick = 0;
+
+  for (;;) {
+    if (!g_outputModeIrqPending) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    g_outputModeIrqPending = false;
+    const TickType_t now = xTaskGetTickCount();
+    const TickType_t elapsed = now - lastHandledTick;
+    if (elapsed < kSwitchDebounceTicks) {
+      vTaskDelay(kSwitchDebounceTicks - elapsed);
+    }
+
+    lastHandledTick = xTaskGetTickCount();
+    applyOutputMode(readRequestedOutputMode());
+  }
+}
+
+
 void createQueues() {
   g_ecgQueue = xQueueCreate(ECG_QUEUE_LEN, sizeof(EcgSample));
   g_ppgQueue = xQueueCreate(PPG_QUEUE_LEN, sizeof(PpgSample));
@@ -519,16 +642,18 @@ void createTasks() {
     }
   }
 
-  if (kEnableWifiOutput) {
-    if (xTaskCreatePinnedToCore(mqttTask, "mqtt_task", 6144, nullptr,
-                                MQTT_TASK_PRIORITY, nullptr, 0) != pdPASS) {
+  if (kEnableBleOutput) {
+    if (xTaskCreatePinnedToCore(bleTask, "ble_task", BLE_TASK_STACK, nullptr,
+                                BLE_TASK_PRIORITY, &g_bleTaskHandle, 0) != pdPASS) {
       taskCreateFailed = true;
+    } else {
+      g_bleStarted = true;
     }
   }
 
-  if (kEnableBleOutput) {
-    if (xTaskCreatePinnedToCore(bleTask, "ble_task", BLE_TASK_STACK, nullptr,
-                                BLE_TASK_PRIORITY, nullptr, 0) != pdPASS) {
+  if (kEnableWifiOutput || kEnableBleOutput) {
+    if (xTaskCreatePinnedToCore(outputModeControlTask, "mode_task", OUTPUT_MODE_TASK_STACK,
+                                nullptr, LOGGER_TASK_PRIORITY, nullptr, 1) != pdPASS) {
       taskCreateFailed = true;
     }
   }
@@ -554,10 +679,7 @@ void setup() {
   }
   data_logger::logStatus(F("Initializing biosignal acquisition project..."));
   signal_dsp::begin();
-
-  if (kEnableWifiOutput) {
-    cloud_mqtt::begin();
-  }
+  configureOutputModeSwitch();
   if (kEnableBleOutput) {
     ble_stream::begin();
   }

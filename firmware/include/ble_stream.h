@@ -5,6 +5,7 @@
 namespace ble_stream {
 
 void begin();
+void setActive(bool active);
 void taskLoop();
 bool enqueueEcg(const EcgSample& sample);
 bool enqueuePpg(const PpgSample& sample);

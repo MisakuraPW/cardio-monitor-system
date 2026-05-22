@@ -28,6 +28,7 @@ uint32_t g_tempSeq = 0;
 uint32_t g_lastWifiRetryMs = 0;
 uint32_t g_lastMqttRetryMs = 0;
 uint32_t g_lastDiagPublishMs = 0;
+bool g_active = false;
 bool g_wifiConnectInProgress = false;
 uint32_t g_wifiConnectStartMs = 0;
 constexpr bool kDemoWifiMode = true;
@@ -996,14 +997,6 @@ void begin() {
   WiFi.setSleep(false);
   WiFi.setSleep(WIFI_PS_NONE);
 
-  // Trigger the first association attempt during init so WiFi does not depend
-  // on mqttTask startup timing.
-  WiFi.disconnect(false, true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  g_wifiConnectInProgress = true;
-  g_wifiConnectStartMs = millis();
-  g_lastWifiRetryMs = g_wifiConnectStartMs;
-
   if (g_ecgMqttQueue == nullptr) {
     g_ecgMqttQueue = xQueueCreate(kEcgMqttQueueLen, sizeof(EcgSample));
     if (g_ecgMqttQueue == nullptr) {
@@ -1043,7 +1036,49 @@ void begin() {
   data_logger::logStatus(msg);
 }
 
+void setActive(const bool active) {
+  if (g_active == active) {
+    return;
+  }
+
+  g_active = active;
+  if (active) {
+    WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);
+    WiFi.setSleep(WIFI_PS_NONE);
+    WiFi.disconnect(false, true);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    g_wifiConnectInProgress = true;
+    g_wifiConnectStartMs = millis();
+    g_lastWifiRetryMs = g_wifiConnectStartMs;
+    data_logger::logStatus("[NET] WiFi/MQTT output active.");
+  } else {
+    if (g_mqttClient.connected()) {
+      g_mqttClient.disconnect();
+    }
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_OFF);
+    if (g_ecgMqttQueue != nullptr) {
+      xQueueReset(g_ecgMqttQueue);
+    }
+    if (g_ppgMqttQueue != nullptr) {
+      xQueueReset(g_ppgMqttQueue);
+    }
+    if (g_imuMqttQueue != nullptr) {
+      xQueueReset(g_imuMqttQueue);
+    }
+    if (g_tempMqttQueue != nullptr) {
+      xQueueReset(g_tempMqttQueue);
+    }
+    g_wifiConnectInProgress = false;
+    data_logger::logStatus("[NET] WiFi/MQTT output inactive.");
+  }
+}
+
 bool enqueueEcg(const EcgSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (!g_enableEcg) {
     return true;
   }
@@ -1063,6 +1098,9 @@ bool enqueueEcg(const EcgSample& sample) {
 }
 
 bool enqueuePpg(const PpgSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (!g_enablePpg) {
     return true;
   }
@@ -1098,6 +1136,9 @@ bool enqueuePpg(const PpgSample& sample) {
 }
 
 bool enqueueImu(const ImuSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (kDemoWifiMode) {
     return true;
   }
@@ -1142,6 +1183,9 @@ bool enqueueImu(const ImuSample& sample) {
 }
 
 bool enqueueTemperature(const TemperatureSample& sample) {
+  if (!g_active) {
+    return true;
+  }
   if (!g_enableTemp) {
     return true;
   }
@@ -1165,6 +1209,11 @@ void taskLoop() {
   TickType_t lastWake = xTaskGetTickCount();
 
   for (;;) {
+    if (!g_active) {
+      vTaskDelayUntil(&lastWake, kMqttTaskPeriodTicks);
+      continue;
+    }
+
     if (ensureWifiConnected() && ensureMqttConnected()) {
       publishDiagTelemetry();
       for (uint8_t burst = 0; burst < kPublishBurstsPerLoop; ++burst) {
