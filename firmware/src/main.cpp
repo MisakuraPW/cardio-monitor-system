@@ -532,9 +532,34 @@ bool startMqttTaskIfNeeded() {
   return true;
 }
 
+bool startBleTaskIfNeeded() {
+  if (!kEnableBleOutput) {
+    return false;
+  }
+  if (!g_bleStarted) {
+    ble_stream::begin();
+    if (xTaskCreatePinnedToCore(bleTask, "ble_task", BLE_TASK_STACK, nullptr,
+                                BLE_TASK_PRIORITY, &g_bleTaskHandle, 0) != pdPASS) {
+      data_logger::logStatus(F("BLE task creation failed."));
+      g_bleTaskHandle = nullptr;
+      return false;
+    }
+    g_bleStarted = true;
+  }
+  return true;
+}
+
 void applyOutputMode(const OutputMode requestedMode) {
   if (requestedMode == g_outputMode) {
     return;
+  }
+
+  if (requestedMode == OutputMode::Wifi && g_outputMode == OutputMode::Ble) {
+    g_useBleOutput = false;
+    ble_stream::setActive(false);
+    data_logger::logStatus(F("BLE -> WiFi selected, restarting into WiFi mode."));
+    delay(100);
+    ESP.restart();
   }
 
   g_useWifiOutput = false;
@@ -562,7 +587,7 @@ void applyOutputMode(const OutputMode requestedMode) {
     }
     data_logger::logStatus(F("GPIO27 high: WiFi selected, but WiFi output is unavailable."));
   } else if (requestedMode == OutputMode::Ble) {
-    if (kEnableBleOutput && g_bleStarted) {
+    if (startBleTaskIfNeeded()) {
       ble_stream::setActive(true);
       g_useBleOutput = true;
       g_outputMode = OutputMode::Ble;
@@ -642,15 +667,6 @@ void createTasks() {
     }
   }
 
-  if (kEnableBleOutput) {
-    if (xTaskCreatePinnedToCore(bleTask, "ble_task", BLE_TASK_STACK, nullptr,
-                                BLE_TASK_PRIORITY, &g_bleTaskHandle, 0) != pdPASS) {
-      taskCreateFailed = true;
-    } else {
-      g_bleStarted = true;
-    }
-  }
-
   if (kEnableWifiOutput || kEnableBleOutput) {
     if (xTaskCreatePinnedToCore(outputModeControlTask, "mode_task", OUTPUT_MODE_TASK_STACK,
                                 nullptr, LOGGER_TASK_PRIORITY, nullptr, 1) != pdPASS) {
@@ -680,9 +696,6 @@ void setup() {
   data_logger::logStatus(F("Initializing biosignal acquisition project..."));
   signal_dsp::begin();
   configureOutputModeSwitch();
-  if (kEnableBleOutput) {
-    ble_stream::begin();
-  }
   createQueues();
   if (g_ecgQueue == nullptr || g_ppgQueue == nullptr || g_imuQueue == nullptr ||
       g_tempQueue == nullptr ||
