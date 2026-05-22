@@ -438,6 +438,7 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Widget _buildLocalAnalysisCard(BuildContext context) {
     final analysis = _controller.localAnalysis;
+    final physio = analysis.physio;
 
     return Card(
       child: Padding(
@@ -447,7 +448,7 @@ class _DashboardPageState extends State<DashboardPage> {
           children: <Widget>[
             Text('本地统计与分析', style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 8),
-            const Text('这里先放轻量统计与简单规则分析，后续可以继续接本地模型或信号处理模块。'),
+            const Text('基于缓冲信号的轻量统计与生理参数估算，供参考使用。'),
             const SizedBox(height: 12),
             Wrap(
               spacing: 8,
@@ -458,6 +459,35 @@ class _DashboardPageState extends State<DashboardPage> {
                 _MetricChip(label: '平均质量', value: '${(analysis.meanQuality * 100).toStringAsFixed(0)} %'),
               ],
             ),
+            if (physio.hasAny) ...<Widget>[
+              const SizedBox(height: 16),
+              Text('生理参数估算', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  if (physio.heartRateBpm != null)
+                    _MetricChip(label: '心率', value: '${physio.heartRateBpm!.toStringAsFixed(1)} BPM'),
+                  if (physio.hrvRmssd != null)
+                    _MetricChip(label: 'HRV RMSSD', value: '${physio.hrvRmssd!.toStringAsFixed(1)} ms'),
+                  if (physio.hrvSdnn != null)
+                    _MetricChip(label: 'HRV SDNN', value: '${physio.hrvSdnn!.toStringAsFixed(1)} ms'),
+                  if (physio.hrvPnn50 != null)
+                    _MetricChip(label: 'pNN50', value: '${physio.hrvPnn50!.toStringAsFixed(1)} %'),
+                  if (physio.respiratoryRateBpm != null)
+                    _MetricChip(label: '呼吸频率', value: '${physio.respiratoryRateBpm!.toStringAsFixed(1)} 次/min'),
+                  if (physio.spo2Percent != null)
+                    _MetricChip(label: 'SpO₂ 估算', value: '${physio.spo2Percent!.toStringAsFixed(1)} %'),
+                  if (physio.temperatureCelsius != null)
+                    _MetricChip(label: '体温', value: '${physio.temperatureCelsius!.toStringAsFixed(2)} °C'),
+                ],
+              ),
+              if (physio.notes.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 8),
+                Text(physio.notes.join(' · '), style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ],
             const SizedBox(height: 16),
             Text('即时结论', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 8),
@@ -1421,18 +1451,103 @@ class _ReportCard extends StatelessWidget {
 
   final MedicalReport report;
 
+  Color _riskColor(String? level) {
+    switch (level) {
+      case 'high':
+        return const Color(0xFFE63946);
+      case 'medium':
+        return const Color(0xFFF4A261);
+      case 'low':
+        return const Color(0xFF2A9D8F);
+      default:
+        return const Color(0xFF8D99AE);
+    }
+  }
+
+  String _riskLabel(String? level) {
+    switch (level) {
+      case 'high':
+        return '高风险';
+      case 'medium':
+        return '中风险';
+      case 'low':
+        return '低风险';
+      default:
+        return '未评估';
+    }
+  }
+
+  Color _severityColor(String severity) {
+    switch (severity) {
+      case 'high':
+        return const Color(0xFFE63946);
+      case 'medium':
+        return const Color(0xFFF4A261);
+      case 'low':
+        return const Color(0xFF457B9D);
+      default:
+        return const Color(0xFF8D99AE);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final bool isRuleFallback = report.summary.contains('未启用大模型');
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text('云端报告', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            Text('会话 ${report.sessionId}'),
-            Text('生成时间 ${report.generatedAt}'),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text('云端报告', style: Theme.of(context).textTheme.titleMedium),
+                ),
+                if (report.riskLevel != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _riskColor(report.riskLevel).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: _riskColor(report.riskLevel)),
+                    ),
+                    child: Text(
+                      _riskLabel(report.riskLevel),
+                      style: TextStyle(
+                        color: _riskColor(report.riskLevel),
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text('会话 ${report.sessionId}', style: const TextStyle(fontSize: 12, color: Color(0xFF8D99AE))),
+            Text('生成时间 ${report.generatedAt}', style: const TextStyle(fontSize: 12, color: Color(0xFF8D99AE))),
+            if (report.confidence != null) ...<Widget>[
+              const SizedBox(height: 4),
+              Text(
+                '分析置信度 ${(report.confidence! * 100).toStringAsFixed(0)}%',
+                style: const TextStyle(fontSize: 12, color: Color(0xFF8D99AE)),
+              ),
+            ],
+            if (isRuleFallback) ...<Widget>[
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF3CD),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFFFD166)),
+                ),
+                child: const Text(
+                  '未启用大模型，降级输出',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF856404)),
+                ),
+              ),
+            ],
             const SizedBox(height: 12),
             Text(report.summary),
             const SizedBox(height: 16),
@@ -1451,9 +1566,26 @@ class _ReportCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Text('${finding.title} [${finding.severity}]'),
+                      Row(
+                        children: <Widget>[
+                          Container(
+                            width: 8,
+                            height: 8,
+                            margin: const EdgeInsets.only(right: 6, top: 1),
+                            decoration: BoxDecoration(
+                              color: _severityColor(finding.severity),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          Expanded(child: Text(finding.title, style: const TextStyle(fontWeight: FontWeight.w500))),
+                          Text(
+                            finding.severity,
+                            style: TextStyle(fontSize: 11, color: _severityColor(finding.severity)),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 4),
-                      Text(finding.detail),
+                      Text(finding.detail, style: const TextStyle(fontSize: 13)),
                     ],
                   ),
                 ),

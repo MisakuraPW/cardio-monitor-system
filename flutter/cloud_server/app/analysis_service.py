@@ -4,7 +4,7 @@ from typing import Any
 
 from .analysis_provider import build_analysis_provider
 from .config import Settings
-from .models import MedicalReport, ReportFinding
+from .models import MedicalReport, PatientProfile, ReportFinding
 from .reporting import build_rule_report
 from .storage import SQLiteStorage
 
@@ -13,6 +13,7 @@ def process_analysis_job(
     storage: SQLiteStorage,
     settings: Settings,
     job_id: str,
+    patient_profile: PatientProfile | None = None,
 ) -> MedicalReport:
     job = storage.start_analysis_job(job_id)
     session = storage.get_session(job.sessionId)
@@ -34,6 +35,7 @@ def process_analysis_job(
             features=summary,
             excerpts=excerpts,
             context={'ruleReport': rule_report.model_dump()},
+            patient_profile=patient_profile,
         )
 
         report = _merge_reports(
@@ -41,6 +43,7 @@ def process_analysis_job(
             provider_output.summaryAppendix,
             provider_output.findings or [],
             provider_output.recommendations or [],
+            provider_output.riskLevel,
             provider_output.confidence,
             provider_output.modelTrace,
         )
@@ -68,6 +71,7 @@ def process_segment_analysis(
     settings: Settings,
     session_id: str,
     segment_id: str,
+    patient_profile: PatientProfile | None = None,
 ) -> MedicalReport:
     session = storage.get_session(session_id)
     if session is None:
@@ -86,12 +90,14 @@ def process_segment_analysis(
             'segment': segment.model_dump(exclude={'channels'}),
             'ruleReport': rule_report.model_dump(),
         },
+        patient_profile=patient_profile,
     )
     report = _merge_reports(
         rule_report,
         provider_output.summaryAppendix,
         provider_output.findings or [],
         provider_output.recommendations or [],
+        provider_output.riskLevel,
         provider_output.confidence,
         provider_output.modelTrace,
     )
@@ -150,6 +156,7 @@ def _merge_reports(
     summary_appendix: str,
     provider_findings: list[ReportFinding],
     provider_recommendations: list[str],
+    risk_level: str | None,
     confidence: float | None,
     model_trace,
 ) -> MedicalReport:
@@ -175,6 +182,7 @@ def _merge_reports(
         summary=summary,
         recommendations=recommendations,
         findings=dedup_findings,
+        riskLevel=risk_level if risk_level is not None else rule_report.riskLevel,
         confidence=confidence if confidence is not None else rule_report.confidence,
         modelTrace=model_trace or rule_report.modelTrace,
     )

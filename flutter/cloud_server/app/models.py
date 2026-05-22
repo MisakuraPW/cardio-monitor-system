@@ -52,6 +52,7 @@ class UploadRecord(BaseModel):
 
 class AnalysisJobCreate(BaseModel):
     sessionId: str
+    patientProfile: PatientProfile | None = None
 
 
 class AnalysisJobRecord(BaseModel):
@@ -78,12 +79,19 @@ class ModelTrace(BaseModel):
     note: str = ''
 
 
+class PatientProfile(BaseModel):
+    age: int | None = None
+    gender: str | None = None
+    medicalHistory: str | None = None
+
+
 class MedicalReport(BaseModel):
     sessionId: str
     generatedAt: str
     summary: str
     recommendations: list[str] = Field(default_factory=list)
     findings: list[ReportFinding] = Field(default_factory=list)
+    riskLevel: str | None = None  # 'low' | 'medium' | 'high' | None
     confidence: float | None = None
     modelTrace: ModelTrace | None = None
 

@@ -230,6 +230,21 @@ class _Bio1BinaryCodec {
             transport: transport,
           );
           break;
+        case 'T':
+          _decodeTemp(
+            data,
+            seq: seq,
+            sampleCount: sampleCount,
+            deviceId: deviceId,
+            sessionId: sessionId,
+            frames: frames,
+            channels: channels,
+            payloadOffset: headerLength,
+            frameVersion: frameVersion,
+            decodeStatus: decodeStatus,
+            transport: transport,
+          );
+          break;
       }
 
       cursor = magicIndex + frameLength;
@@ -436,6 +451,61 @@ class _Bio1BinaryCodec {
         ),
       );
     }
+  }
+
+  // BIO2 'T' frame: each sample is 8B ts_us + 2B raw + 4B float temp_c + 1B flags = 15B
+  static void _decodeTemp(
+    ByteData data, {
+    required int seq,
+    required int sampleCount,
+    required String deviceId,
+    required String sessionId,
+    required List<SignalFrame> frames,
+    required Map<String, ChannelDescriptor> channels,
+    required int payloadOffset,
+    required int frameVersion,
+    required String decodeStatus,
+    required String transport,
+  }) {
+    const int sampleSize = 15;
+    final timestampsUs = <int>[];
+    final tempValues = <double>[];
+    for (var index = 0; index < sampleCount; index++) {
+      final offset = payloadOffset + index * sampleSize;
+      if (offset + sampleSize > data.lengthInBytes) break;
+      timestampsUs.add(_readUint64Le(data, offset));
+      // float32 little-endian at offset+10
+      final rawBytes = Uint8List(4);
+      rawBytes[0] = data.getUint8(offset + 10);
+      rawBytes[1] = data.getUint8(offset + 11);
+      rawBytes[2] = data.getUint8(offset + 12);
+      rawBytes[3] = data.getUint8(offset + 13);
+      tempValues.add(ByteData.sublistView(rawBytes).getFloat32(0, Endian.little).toDouble());
+    }
+    if (timestampsUs.isEmpty) return;
+    final sampleRate = _estimateSampleRate(timestampsUs, 1.0);
+    channels['temp'] = _channel(
+      key: 'temp',
+      label: '体温',
+      unit: '°C',
+      colorHex: '#E76F51',
+      sampleRate: sampleRate,
+    );
+    frames.add(
+      _frame(
+        deviceId: deviceId,
+        sessionId: sessionId,
+        channelKey: 'temp',
+        seq: seq,
+        unit: '°C',
+        sampleRate: sampleRate,
+        timestampsUs: timestampsUs,
+        samples: tempValues,
+        transport: transport,
+        frameVersion: frameVersion,
+        decodeStatus: decodeStatus,
+      ),
+    );
   }
 
   static SignalFrame _frame({
@@ -671,6 +741,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     }
     client.subscribe('$_baseTopic/metrics', MqttQos.atLeastOnce);
     client.subscribe('$_baseTopic/alerts', MqttQos.atLeastOnce);
+    client.subscribe('$_baseTopic/temperature', MqttQos.atMostOnce);
     if (config.demoMode) {
       await sendControl(
         const ControlCommand(
@@ -796,7 +867,62 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
         final message = (jsonMap['message'] ?? '收到报警事件').toString();
         _emitStatus(AdapterState.error, message);
       }
+
+      if (topic.endsWith('/temperature')) {
+        _handleTemperatureJson(jsonMap);
+      }
     }
+  }
+
+  void _handleTemperatureJson(Map<String, dynamic> json) {
+    final rawSamples = json['samples'] as List<dynamic>? ?? const <dynamic>[];
+    if (rawSamples.isEmpty) return;
+    final sampleRate = (json['sampleRate'] as num?)?.toDouble() ?? 1.0;
+    final baseTimestampMs = (json['timestampMs'] as num?)?.toInt() ??
+        DateTime.now().millisecondsSinceEpoch;
+    final seq = (json['seq'] as num?)?.toInt() ?? 0;
+    final deviceId = (json['deviceId'] ?? _binarySessionId).toString();
+    final sessionId = _binarySessionId;
+
+    final tempValues = <double>[];
+    final timestamps = <int>[];
+    for (final dynamic item in rawSamples) {
+      if (item is Map<String, dynamic>) {
+        final tempC = (item['tempC'] as num?)?.toDouble();
+        final tsUs = (item['tsUs'] as num?)?.toInt();
+        if (tempC != null) {
+          tempValues.add(tempC);
+          timestamps.add(tsUs != null ? tsUs ~/ 1000 : baseTimestampMs);
+        }
+      }
+    }
+    if (tempValues.isEmpty) return;
+
+    _mergeBinaryCatalog(<ChannelDescriptor>[
+      ChannelDescriptor(
+        key: 'temp',
+        label: '体温',
+        unit: '°C',
+        sampleRate: sampleRate,
+        colorHex: '#E76F51',
+        enabled: true,
+      ),
+    ]);
+    _frameController.add(SignalFrame(
+      deviceId: deviceId,
+      sessionId: sessionId,
+      seq: seq,
+      timestampMs: timestamps.first,
+      channelKey: 'temp',
+      sampleRate: sampleRate,
+      unit: '°C',
+      quality: 1.0,
+      samples: tempValues,
+      sampleTimestampsMs: timestamps,
+      transport: 'mqtt_json',
+      receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+      sourceSeq: seq,
+    ));
   }
 
   bool _tryHandleBinaryPayload(String topic, Uint8List payloadBytes) {

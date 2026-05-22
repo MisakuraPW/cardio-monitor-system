@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir \"g:\\\\课设\\\\system\\\\cardio-monitor-system\")"
+    ]
+  }
+}
