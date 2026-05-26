@@ -691,6 +691,88 @@ class LocalAnalysisSnapshot {
   final PhysiologicalMetrics physio;
 }
 
+enum AgentState { idle, analyzing, normal, warning, highRisk, error }
+
+class MonitoringAgentStatus {
+  MonitoringAgentStatus({
+    this.state = AgentState.idle,
+    this.lastAnalysisTime,
+    this.riskLevel,
+    this.confidence,
+    this.summary = '',
+    this.notificationText = '',
+    this.isAlertAcknowledged = false,
+    this.lastAlertRiskLevel,
+    this.lastAlertTime,
+    this.error = '',
+  });
+
+  AgentState state;
+  DateTime? lastAnalysisTime;
+  String? riskLevel;
+  double? confidence;
+  String summary;
+  String notificationText;
+  bool isAlertAcknowledged;
+  String? lastAlertRiskLevel;
+  DateTime? lastAlertTime;
+  String error;
+
+  static const Duration alertCooldown = Duration(minutes: 5);
+  static const Duration agentCheckInterval = Duration(seconds: 30);
+
+  bool get isHighRisk => state == AgentState.highRisk;
+  bool get hasActiveAlert => isHighRisk && !isAlertAcknowledged;
+
+  bool shouldShowAlert() {
+    if (riskLevel != 'high') return false;
+    if (lastAlertRiskLevel == 'high' && lastAlertTime != null) {
+      return DateTime.now().difference(lastAlertTime!) > alertCooldown;
+    }
+    return lastAlertRiskLevel != 'high';
+  }
+
+  void markAlertShown() {
+    lastAlertRiskLevel = riskLevel;
+    lastAlertTime = DateTime.now();
+    isAlertAcknowledged = false;
+  }
+
+  void acknowledgeAlert() {
+    isAlertAcknowledged = true;
+  }
+
+  String get riskLabel {
+    switch (riskLevel) {
+      case 'high':
+        return '高风险';
+      case 'medium':
+        return '中风险';
+      case 'low':
+        return '低风险';
+      default:
+        return '未评估';
+    }
+  }
+
+  String get stateLabel {
+    switch (state) {
+      case AgentState.idle:
+        return '待机';
+      case AgentState.analyzing:
+        return '分析中';
+      case AgentState.normal:
+        return '正常';
+      case AgentState.warning:
+        return '注意';
+      case AgentState.highRisk:
+        return '高风险预警';
+      case AgentState.error:
+        return '异常';
+    }
+  }
+}
+
 Color colorFromHex(String hex) {
   final normalized = hex.replaceFirst('#', '');
   final buffer = StringBuffer();

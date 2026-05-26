@@ -1,11 +1,11 @@
-﻿import 'dart:math' as math;
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
 import 'models.dart';
 import 'monitor_controller.dart';
 
-const double _waveformYAxisWidth = 56;
+const double _waveformYAxisWidth = 48;
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -30,7 +30,9 @@ class _DashboardPageState extends State<DashboardPage> {
   late final TextEditingController _bleControlController;
   late final Listenable _waveformListenable;
 
-  int _sidePanelIndex = 0;
+  bool _advancedConnectionOpen = false;
+  bool _detailStatsOpen = false;
+  bool _diagnosticsLogOpen = false;
 
   @override
   void initState() {
@@ -75,173 +77,329 @@ class _DashboardPageState extends State<DashboardPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('多源心肺功能监测上位机'),
-        actions: <Widget>[
-          Padding(
-            padding: const EdgeInsets.only(right: 16),
-            child: Center(
-              child: AnimatedBuilder(
-                animation: _controller,
-                builder: (BuildContext context, Widget? child) =>
-                    _StatusBadge(status: _controller.status),
-              ),
-            ),
-          ),
-        ],
-      ),
-      body: LayoutBuilder(
-        builder: (BuildContext context, BoxConstraints constraints) {
-          final isCompact = constraints.maxWidth < 1180;
-          final content = <Widget>[
-            SizedBox(
-              width: isCompact ? double.infinity : 400,
-              child: AnimatedBuilder(
-                animation: _controller,
-                builder: (BuildContext context, Widget? child) =>
-                    _buildControlPanel(context),
-              ),
-            ),
-            SizedBox(width: isCompact ? 0 : 20, height: isCompact ? 20 : 0),
+      body: AnimatedBuilder(
+        animation: _controller,
+        builder: (BuildContext context, Widget? _) => Column(
+          children: <Widget>[
+            _buildTopBar(context),
+            if (_controller.agentStatus.hasActiveAlert) _buildHighRiskAlertBar(context),
             Expanded(
-              child: AnimatedBuilder(
-                animation: _waveformListenable,
-                builder: (BuildContext context, Widget? child) =>
-                    _buildWaveformArea(context),
-              ),
-            ),
-          ];
-
-          return Padding(
-            padding: const EdgeInsets.all(20),
-            child: isCompact
-                ? Column(children: content)
-                : Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: content,
-                  ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _buildControlPanel(BuildContext context) {
-    return SingleChildScrollView(
-      child: Column(
-        children: <Widget>[
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(18),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text('功能分区', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: ChoiceChip(
-                          label: const Text('配置与记录'),
-                          selected: _sidePanelIndex == 0,
-                          onSelected: (_) => setState(() => _sidePanelIndex = 0),
-                        ),
+              child: LayoutBuilder(
+                builder: (BuildContext context, BoxConstraints constraints) {
+                  final isCompact = constraints.maxWidth < 1100;
+                  if (isCompact) {
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        children: <Widget>[
+                          _buildMetricsBar(context),
+                          const SizedBox(height: 12),
+                          AnimatedBuilder(
+                            animation: _waveformListenable,
+                            builder: (_, __) => _buildWaveformArea(context),
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: _buildControlPanel(context),
+                          ),
+                          const SizedBox(height: 12),
+                        ],
                       ),
-                      const SizedBox(width: 10),
+                    );
+                  }
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      _buildControlPanel(context),
                       Expanded(
-                        child: ChoiceChip(
-                          label: const Text('控制与分析'),
-                          selected: _sidePanelIndex == 1,
-                          onSelected: (_) => setState(() => _sidePanelIndex = 1),
+                        child: AnimatedBuilder(
+                          animation: _waveformListenable,
+                          builder: (_, __) => Column(
+                            children: <Widget>[
+                              _buildMetricsBar(context),
+                              const SizedBox(height: 12),
+                              Expanded(child: _buildWaveformArea(context)),
+                            ],
+                          ),
                         ),
                       ),
                     ],
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    _sidePanelIndex == 0
-                        ? '用于切换数据源、配置连接参数和查看运行日志。'
-                        : '用于控制波形显示，并查看本地统计与云端分析结果。',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
+                  );
+                },
               ),
             ),
-          ),
-          const SizedBox(height: 16),
-          if (_sidePanelIndex == 0) ...<Widget>[
-            _buildDataSourceCard(context),
-            const SizedBox(height: 16),
-            _buildTransportDiagnosticsCard(context),
-            const SizedBox(height: 16),
-            _buildStatusLogCard(context),
-          ] else ...<Widget>[
-            _buildDisplayControlCard(context),
-            const SizedBox(height: 16),
-            _buildChannelCatalogCard(context),
-            const SizedBox(height: 16),
-            _buildLocalAnalysisCard(context),
-            const SizedBox(height: 16),
-            _buildCloudAnalysisCard(context),
           ],
+        ),
+      ),
+    );
+  }
+
+  // ── Top status bar ──────────────────────────────────────────────
+
+  Widget _buildTopBar(BuildContext context) {
+    return Container(
+      height: 48,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: const BoxDecoration(
+        color: Color(0xFF0B6E4F),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.monitor_heart_outlined, color: Colors.white, size: 20),
+          const SizedBox(width: 8),
+          const Text(
+            '心肺功能监测控制台',
+            style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+          ),
+          const Spacer(),
+          AnimatedBuilder(
+            animation: _controller,
+            builder: (_, __) => _StatusBadge(status: _controller.status),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildDataSourceCard(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
+  // ── High-risk alert bar ─────────────────────────────────────────
+
+  Widget _buildHighRiskAlertBar(BuildContext context) {
+    final agent = _controller.agentStatus;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: const BoxDecoration(
+        color: Color(0xFFE63946),
+      ),
+      child: Row(
+        children: <Widget>[
+          const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 18),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '高风险预警：${agent.summary}（辅助预警，不构成医疗诊断）',
+              style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          TextButton(
+            onPressed: () => _showAgentDetailDialog(context),
+            style: TextButton.styleFrom(foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(horizontal: 8)),
+            child: const Text('查看依据', style: TextStyle(fontSize: 12)),
+          ),
+          TextButton(
+            onPressed: () => _controller.acknowledgeAgentAlert(),
+            style: TextButton.styleFrom(foregroundColor: Colors.white70, padding: const EdgeInsets.symmetric(horizontal: 8)),
+            child: const Text('确认已知晓', style: TextStyle(fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── Key metrics bar ─────────────────────────────────────────────
+
+  Widget _buildMetricsBar(BuildContext context) {
+    final physio = _controller.localAnalysis.physio;
+    final analysis = _controller.localAnalysis;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFD0D8D3).withValues(alpha: 0.5)),
+      ),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        children: <Widget>[
+          if (physio.heartRateBpm != null)
+            _VitalChip(
+              icon: Icons.favorite,
+              color: const Color(0xFFE63946),
+              label: 'HR',
+              value: physio.heartRateBpm!.toStringAsFixed(0),
+              unit: 'BPM',
+            ),
+          if (physio.spo2Percent != null)
+            _VitalChip(
+              icon: Icons.air,
+              color: const Color(0xFF2A9D8F),
+              label: 'SpO₂',
+              value: physio.spo2Percent!.toStringAsFixed(0),
+              unit: '%',
+            ),
+          _VitalChip(
+            icon: Icons.analytics_outlined,
+            color: const Color(0xFF457B9D),
+            label: '质量',
+            value: (analysis.meanQuality * 100).toStringAsFixed(0),
+            unit: '%',
+          ),
+          _VitalChip(
+            icon: Icons.upload_outlined,
+            color: const Color(0xFF8D99AE),
+            label: '分段',
+            value: '${_controller.uploadedSegmentCount}',
+            unit: '段',
+          ),
+          if (_controller.isConnected)
+            _VitalChip(
+              icon: Icons.timer_outlined,
+              color: _controller.transportStats.isNotEmpty &&
+                      _controller.transportStats.first.lastPublishLatencyMs > 200
+                  ? const Color(0xFFF4A261)
+                  : const Color(0xFF2A9D8F),
+              label: '延迟',
+              value: _controller.transportStats.isNotEmpty
+                  ? '${_controller.transportStats.first.lastPublishLatencyMs}'
+                  : '-',
+              unit: 'ms',
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ── Waveform area ───────────────────────────────────────────────
+
+  Widget _buildWaveformArea(BuildContext context) {
+    final visibleChannels = _controller.visibleChannels;
+    if (visibleChannels.isEmpty) {
+      return Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D1B2A),
+          borderRadius: BorderRadius.circular(12),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.monitor_heart_outlined, size: 48, color: Colors.teal[300]!.withValues(alpha: 0.5)),
+              const SizedBox(height: 12),
+              Text(
+                '暂无可显示的通道',
+                style: TextStyle(color: Colors.teal[200], fontSize: 14),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '请先连接 MQTT / 蓝牙设备，或导入回放文件',
+                style: TextStyle(color: Colors.teal[200]!.withValues(alpha: 0.6), fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+    return ListView.separated(
+      itemCount: visibleChannels.length + (_controller.report != null ? 1 : 0),
+      separatorBuilder: (_, __) => const SizedBox(height: 8),
+      itemBuilder: (BuildContext context, int index) {
+        if (_controller.report != null && index == visibleChannels.length) {
+          return _ReportCard(report: _controller.report!);
+        }
+        final channel = visibleChannels[index];
+        final waveform = _controller.visibleWaveform(channel.key);
+        return _WaveformCard(
+          channel: channel,
+          points: waveform.points,
+          minValue: waveform.minValue,
+          maxValue: waveform.maxValue,
+          gain: _controller.gain,
+          secondsPerScreen: _controller.secondsPerScreen,
+          anchorTimestampMs: _controller.currentAnchorTimestampMs,
+          summary: _controller.channelSummary(channel.key),
+          runtime: _controller.channelRuntime(channel.key),
+          enableHoverInspect: _controller.isPaused,
+        );
+      },
+    );
+  }
+
+  // ── Control sidebar (unified single-panel) ──────────────────────
+
+  static const _kSidebarWidth = 348.0;
+
+  Widget _buildControlPanel(BuildContext context) {
+    return Container(
+      width: _kSidebarWidth,
+      decoration: const BoxDecoration(
+        color: Color(0xFFF4F7F5),
+        border: Border(right: BorderSide(color: Color(0xFFD0D8D3), width: 1)),
+      ),
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text('数据源', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: DataSourceMode.values.map((DataSourceMode item) {
-                return ChoiceChip(
-                  label: Text(item.label),
-                  selected: _controller.mode == item,
-                  onSelected: (_) => _controller.setMode(item),
-                );
-              }).toList(),
-            ),
-            const SizedBox(height: 16),
-            _buildTextField('用户姓名 / 编号', _userNameController, (String value) {
-              _controller.updateUserName(value);
-            }),
-            const SizedBox(height: 12),
-            if (_controller.mode == DataSourceMode.wifi) ...<Widget>[
-              _buildTextField('Broker Host', _hostController, (String value) {
-                _controller.updateMqttConfig(host: value);
-              }),
-              const SizedBox(height: 12),
-              Row(
-                children: <Widget>[
-                  Expanded(
-                    child: _buildTextField('端口', _portController, (String value) {
-                      final parsed = int.tryParse(value);
-                      if (parsed != null) {
-                        _controller.updateMqttConfig(port: parsed);
-                      }
-                    }),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildTextField('WebSocket Path', _pathController, (String value) {
-                      _controller.updateMqttConfig(path: value);
-                    }),
-                  ),
-                ],
+            _buildConnectionBlock(context),
+            _SidebarDivider(),
+            _buildDisplayControlBlock(context),
+            _SidebarDivider(),
+            _buildChannelBlock(context),
+            _SidebarDivider(),
+            _buildLocalSummaryBlock(context),
+            _SidebarDivider(),
+            _buildSmartAnalysisBlock(context),
+            _SidebarDivider(),
+            _buildDiagnosticsBlock(context),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── 1. 采集与连接 ──────────────────────────────────────────────
+
+  Widget _buildConnectionBlock(BuildContext context) {
+    return _SidebarSection(
+      icon: Icons.link,
+      title: '采集与连接',
+      children: <Widget>[
+        _buildSourceSegmentedControl(context),
+        const SizedBox(height: 8),
+        _buildTextField('用户姓名 / 编号', _userNameController, (String value) {
+          _controller.updateUserName(value);
+        }),
+        if (_controller.mode == DataSourceMode.wifi) ...<Widget>[
+          const SizedBox(height: 6),
+          _buildTextField('Broker Host', _hostController, (String value) {
+            _controller.updateMqttConfig(host: value);
+          }),
+          const SizedBox(height: 6),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _buildTextField('端口', _portController, (String value) {
+                  final parsed = int.tryParse(value);
+                  if (parsed != null) _controller.updateMqttConfig(port: parsed);
+                }),
               ),
-              const SizedBox(height: 12),
-              _buildTextField('设备 ID', _deviceIdController, (String value) {
-                _controller.updateMqttConfig(deviceId: value);
-              }),
-              const SizedBox(height: 12),
+              const SizedBox(width: 6),
+              Expanded(
+                child: _buildTextField('Path', _pathController, (String value) {
+                  _controller.updateMqttConfig(path: value);
+                }),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          _buildTextField('设备 ID', _deviceIdController, (String value) {
+            _controller.updateMqttConfig(deviceId: value);
+          }),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            dense: true,
+            shape: const Border(),
+            collapsedShape: const Border(),
+            title: Text('高级连接设置', style: Theme.of(context).textTheme.bodySmall),
+            initiallyExpanded: _advancedConnectionOpen,
+            onExpansionChanged: (v) => setState(() => _advancedConnectionOpen = v),
+            children: <Widget>[
+              const SizedBox(height: 2),
               Row(
                 children: <Widget>[
                   Expanded(
@@ -249,7 +407,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       _controller.updateMqttConfig(username: value);
                     }),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 6),
                   Expanded(
                     child: _buildTextField('密码', _passwordController, (String value) {
                       _controller.updateMqttConfig(password: value);
@@ -257,492 +415,630 @@ class _DashboardPageState extends State<DashboardPage> {
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
               SwitchListTile.adaptive(
                 contentPadding: EdgeInsets.zero,
+                dense: true,
                 title: const Text('启用 TLS / WSS'),
                 value: _controller.mqttConfig.useTls,
                 onChanged: (bool value) => _controller.updateMqttConfig(useTls: value),
               ),
             ],
-            if (_controller.mode == DataSourceMode.file) ...<Widget>[
-              FilledButton.tonalIcon(
-                onPressed: _controller.pickReplayFile,
-                icon: const Icon(Icons.upload_file_outlined),
-                label: const Text('选择 CSV / JSON'),
-              ),
-              const SizedBox(height: 10),
-              Text(_controller.hasReplayFile ? '当前文件: ${_controller.replayFileName}' : '未选择回放文件'),
-              const SizedBox(height: 8),
-              const Text('建议先用仓库里的长样例 CSV 验证滚动、暂停和回滚功能。'),
-            ],
-            if (_controller.mode == DataSourceMode.bluetooth) ...<Widget>[
-              _buildTextField('设备名前缀', _bleNamePrefixController, (String value) {
-                _controller.updateBluetoothConfig(deviceNamePrefix: value);
-              }),
-              const SizedBox(height: 12),
+          ),
+        ],
+        if (_controller.mode == DataSourceMode.file) ...<Widget>[
+          const SizedBox(height: 6),
+          FilledButton.tonalIcon(
+            onPressed: _controller.pickReplayFile,
+            icon: const Icon(Icons.upload_file_outlined, size: 16),
+            label: const Text('选择 CSV / JSON'),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _controller.hasReplayFile ? '当前: ${_controller.replayFileName}' : '未选择回放文件',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+        if (_controller.mode == DataSourceMode.bluetooth) ...<Widget>[
+          const SizedBox(height: 6),
+          _buildTextField('设备名前缀', _bleNamePrefixController, (String value) {
+            _controller.updateBluetoothConfig(deviceNamePrefix: value);
+          }),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            dense: true,
+            shape: const Border(),
+            collapsedShape: const Border(),
+            title: Text('高级 BLE 设置', style: Theme.of(context).textTheme.bodySmall),
+            children: <Widget>[
+              const SizedBox(height: 2),
               _buildTextField('服务 UUID', _bleServiceController, (String value) {
                 _controller.updateBluetoothConfig(serviceUuid: value);
               }),
-              const SizedBox(height: 12),
+              const SizedBox(height: 6),
               _buildTextField('通知特征 UUID', _bleNotifyController, (String value) {
                 _controller.updateBluetoothConfig(notifyCharacteristicUuid: value);
               }),
-              const SizedBox(height: 12),
+              const SizedBox(height: 6),
               _buildTextField('控制特征 UUID', _bleControlController, (String value) {
                 _controller.updateBluetoothConfig(controlCharacteristicUuid: value);
               }),
-              const SizedBox(height: 8),
-              const Text('蓝牙模式基于 Web Bluetooth，默认按 esp32-bio 设备名前缀筛选，并按 BIO1 二进制帧解析 Notify 数据。页面仍需运行在 Chrome / Edge 的 HTTPS 或 localhost 环境下。'),
             ],
-            const SizedBox(height: 16),
-            Text(
-              '自动分段: 每 20 秒上传一次，已上传 ${_controller.uploadedSegmentCount} 段，待上传 ${_controller.pendingSegmentUploadCount} 段，失败 ${_controller.failedSegmentUploadCount} 段。',
-            ),
-            if (_controller.latestSegment != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 6),
-                child: Text('最近分段: #${_controller.latestSegment!.segmentIndex} / ${_controller.latestSegment!.sampleCount} 点'),
-              ),
-            const SizedBox(height: 12),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: FilledButton.icon(
-                    onPressed: _controller.isConnected
-                        ? _controller.disconnect
-                        : () {
-                            _syncConnectionFieldsToController();
-                            _controller.connect();
-                          },
-                    icon: Icon(_controller.isConnected ? Icons.stop_circle_outlined : Icons.play_arrow),
-                    label: Text(_controller.isConnected ? '断开 / 停止' : '连接 / 开始'),
-                  ),
-                ),
-              ],
-            ),
+          ),
+        ],
+        const SizedBox(height: 8),
+        _CompactStatusRow(
+          items: <_StatusItem>[
+            _StatusItem('已上传', '${_controller.uploadedSegmentCount}'),
+            _StatusItem('待上传', '${_controller.pendingSegmentUploadCount}'),
+            if (_controller.failedSegmentUploadCount > 0)
+              _StatusItem('失败', '${_controller.failedSegmentUploadCount}', highlight: true),
           ],
         ),
+        if (_controller.latestSegment != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              '最近分段: #${_controller.latestSegment!.segmentIndex} / ${_controller.latestSegment!.sampleCount} 点',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        const SizedBox(height: 8),
+        SizedBox(
+          width: double.infinity,
+          height: 38,
+          child: FilledButton.icon(
+            onPressed: _controller.isConnected
+                ? _controller.disconnect
+                : () {
+                    _syncConnectionFieldsToController();
+                    _controller.connect();
+                  },
+            icon: Icon(_controller.isConnected ? Icons.stop_circle_outlined : Icons.play_arrow, size: 18),
+            label: Text(_controller.isConnected ? '断开 / 停止' : '连接 / 开始'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSourceSegmentedControl(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFE8EDEA),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: DataSourceMode.values.map((DataSourceMode mode) {
+          final selected = _controller.mode == mode;
+          return Expanded(
+            child: GestureDetector(
+              onTap: () => _controller.setMode(mode),
+              child: AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                padding: const EdgeInsets.symmetric(vertical: 7),
+                decoration: BoxDecoration(
+                  color: selected ? Colors.white : Colors.transparent,
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: selected
+                      ? <BoxShadow>[BoxShadow(color: Colors.black.withValues(alpha: 0.06), blurRadius: 4, offset: const Offset(0, 1))]
+                      : null,
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(
+                      mode == DataSourceMode.wifi
+                          ? Icons.wifi
+                          : mode == DataSourceMode.bluetooth
+                              ? Icons.bluetooth
+                              : Icons.upload_file_outlined,
+                      size: 14,
+                      color: selected ? const Color(0xFF0B6E4F) : const Color(0xFF8D99AE),
+                    ),
+                    const SizedBox(width: 4),
+                    Text(
+                      mode.label,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+                        color: selected ? const Color(0xFF0B6E4F) : const Color(0xFF8D99AE),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
       ),
     );
   }
-  Widget _buildDisplayControlCard(BuildContext context) {
+
+  // ── 2. 显示控制 ────────────────────────────────────────────────
+
+  Widget _buildDisplayControlBlock(BuildContext context) {
     final maxOffset = _controller.maxHistoryOffsetSeconds;
     final historySliderMax = maxOffset <= 0 ? 1.0 : maxOffset;
     final historySliderValue = _controller.isPaused
         ? _controller.historyOffsetSeconds.clamp(0.0, historySliderMax)
         : 0.0;
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('显示控制', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    onPressed: _controller.togglePause,
-                    icon: Icon(_controller.isPaused ? Icons.play_arrow : Icons.pause),
-                    label: Text(_controller.isPaused ? '继续播放' : '暂停回看'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              _controller.isPaused
-                  ? '当前已暂停，历史回滚已解锁；点击继续播放会自动回到最新位置。'
-                  : '当前处于实时播放状态，历史回滚锁定并自动跟随最新数据。',
-            ),
-            const SizedBox(height: 16),
-            Text('时间窗: ${_controller.secondsPerScreen.toStringAsFixed(1)} s'),
-            Slider(
-              value: _controller.secondsPerScreen,
-              min: 2,
-              max: 20,
-              divisions: 18,
-              onChanged: _controller.setSecondsPerScreen,
-            ),
-            Text(
-              '实时延迟缓冲: ${_controller.liveDisplayLagSeconds.toStringAsFixed(1)} s',
-            ),
-            Slider(
-              value: _controller.liveDisplayLagSeconds,
-              min: 0,
-              max: 6,
-              divisions: 24,
-              onChanged: _controller.setLiveDisplayLagSeconds,
-            ),
-            const Text(
-              '实时播放采用软同步：右侧边界跟随全局最新数据，各通道仍按真实时间戳对齐；某一路短暂停顿时会留空并标记滞后，不再拖住整屏。',
-            ),
-            const SizedBox(height: 8),
-            Text(_controller.isPaused ? '历史回滚: ${historySliderValue.toStringAsFixed(1)} s' : '历史回滚: 实时锁定'),
-            Slider(
-              value: historySliderValue,
-              min: 0,
-              max: historySliderMax,
-              onChanged: _controller.canRollbackHistory ? _controller.setHistoryOffsetSeconds : null,
-            ),
-            if (_controller.isPaused && !_controller.canRollbackHistory)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 8),
-                child: Text('当前缓存长度不足一个完整时间窗，已补长样例 CSV 供调试使用。'),
-              ),
-            Text('增益: ${_controller.gain.toStringAsFixed(1)} x'),
-            Slider(
-              value: _controller.gain,
-              min: 0.5,
-              max: 4,
-              divisions: 14,
-              onChanged: _controller.setGain,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildChannelCatalogCard(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('通道显隐', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            if (_controller.channelCatalog.isEmpty)
-              const Text('当前尚未收到通道目录，可以先导入文件或连接 ESP32。'),
-            for (final ChannelDescriptor channel in _controller.channelCatalog)
-              SwitchListTile.adaptive(
-                value: channel.enabled,
-                contentPadding: EdgeInsets.zero,
-                title: Text('${channel.label} (${channel.unit})'),
-                subtitle: Text('${channel.sampleRate.toStringAsFixed(1)} Hz'),
-                secondary: CircleAvatar(
-                  radius: 8,
-                  backgroundColor: colorFromHex(channel.colorHex),
-                ),
-                onChanged: (bool value) => _controller.toggleChannel(channel.key, value),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildLocalAnalysisCard(BuildContext context) {
-    final analysis = _controller.localAnalysis;
-    final physio = analysis.physio;
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('本地统计与分析', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            const Text('基于缓冲信号的轻量统计与生理参数估算，供参考使用。'),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: <Widget>[
-                _MetricChip(label: '启用通道', value: '${analysis.activeChannels}'),
-                _MetricChip(label: '最长时长', value: '${analysis.durationSeconds.toStringAsFixed(1)} s'),
-                _MetricChip(label: '平均质量', value: '${(analysis.meanQuality * 100).toStringAsFixed(0)} %'),
-              ],
-            ),
-            if (physio.hasAny) ...<Widget>[
-              const SizedBox(height: 16),
-              Text('生理参数估算', style: Theme.of(context).textTheme.titleSmall),
-              const SizedBox(height: 8),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: <Widget>[
-                  if (physio.heartRateBpm != null)
-                    _MetricChip(label: '心率', value: '${physio.heartRateBpm!.toStringAsFixed(1)} BPM'),
-                  if (physio.hrvRmssd != null)
-                    _MetricChip(label: 'HRV RMSSD', value: '${physio.hrvRmssd!.toStringAsFixed(1)} ms'),
-                  if (physio.hrvSdnn != null)
-                    _MetricChip(label: 'HRV SDNN', value: '${physio.hrvSdnn!.toStringAsFixed(1)} ms'),
-                  if (physio.hrvPnn50 != null)
-                    _MetricChip(label: 'pNN50', value: '${physio.hrvPnn50!.toStringAsFixed(1)} %'),
-                  if (physio.respiratoryRateBpm != null)
-                    _MetricChip(label: '呼吸频率', value: '${physio.respiratoryRateBpm!.toStringAsFixed(1)} 次/min'),
-                  if (physio.spo2Percent != null)
-                    _MetricChip(label: 'SpO₂ 估算', value: '${physio.spo2Percent!.toStringAsFixed(1)} %'),
-                  if (physio.temperatureCelsius != null)
-                    _MetricChip(label: '体温', value: '${physio.temperatureCelsius!.toStringAsFixed(2)} °C'),
-                ],
-              ),
-              if (physio.notes.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 8),
-                Text(physio.notes.join(' · '), style: Theme.of(context).textTheme.bodySmall),
-              ],
-            ],
-            const SizedBox(height: 16),
-            Text('即时结论', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            if (analysis.findings.isEmpty) const Text('暂无本地分析结论'),
-            ...analysis.findings.map(
-              (String item) => Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: _FindingTile(text: item),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text('通道统计', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            if (analysis.channels.isEmpty) const Text('暂无可统计的通道数据'),
-            ...analysis.channels.map(
-              (LocalChannelAnalysis item) => Padding(
-                padding: const EdgeInsets.only(bottom: 10),
-                child: Container(
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF8FAFC),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: const Color(0xFFDCE3EA)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Row(
-                        children: <Widget>[
-                          Text('${item.label} (${item.unit})', style: Theme.of(context).textTheme.titleSmall),
-                          const Spacer(),
-                          if (item.estimatedRateBpm != null)
-                            Text('${item.estimatedRateBpm!.toStringAsFixed(1)} BPM'),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: <Widget>[
-                          _MetricChip(label: '样本', value: '${item.sampleCount}'),
-                          _MetricChip(label: '均值', value: item.mean.toStringAsFixed(3)),
-                          _MetricChip(label: '峰峰值', value: item.peakToPeak.toStringAsFixed(3)),
-                          _MetricChip(label: 'RMS', value: item.rms.toStringAsFixed(3)),
-                          _MetricChip(label: '标准差', value: item.stdDev.toStringAsFixed(3)),
-                        ],
-                      ),
-                      const SizedBox(height: 10),
-                      Text('范围 ${item.min.toStringAsFixed(3)} ~ ${item.max.toStringAsFixed(3)}，时长 ${item.durationSeconds.toStringAsFixed(1)} s，质量 ${(item.meanQuality * 100).toStringAsFixed(0)} %'),
-                      if (item.notes.isNotEmpty) ...<Widget>[
-                        const SizedBox(height: 8),
-                        Text(item.notes.join(' · ')),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCloudAnalysisCard(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('云端分析', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            _buildTextField('云端地址', _cloudController, (String value) {
-              _controller.updateCloudBaseUrl(value);
-            }),
-            const SizedBox(height: 12),
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: FilledButton.tonalIcon(
-                    onPressed: _controller.uploadAndAnalyze,
-                    icon: const Icon(Icons.cloud_upload_outlined),
-                    label: const Text('上传并分析'),
-                  ),
-                ),
-              ],
-            ),
-            if (_controller.uploadTask != null) ...<Widget>[
-              const SizedBox(height: 12),
-              Text('上传任务: ${_controller.uploadTask!.id}'),
-              Text('状态: ${_controller.uploadTask!.status}'),
-            ],
-            if (_controller.latestSegment != null) ...<Widget>[
-              const SizedBox(height: 12),
-              Text('最近自动分段: #${_controller.latestSegment!.segmentIndex} / ${_controller.latestSegment!.sampleCount} 点'),
-              const SizedBox(height: 8),
-              FilledButton.tonalIcon(
-                onPressed: _controller.analyzeLatestSegment,
-                icon: const Icon(Icons.psychology_alt_outlined),
-                label: const Text('分析最近分段'),
-              ),
-            ],
-            if (_controller.analysisJob != null) ...<Widget>[
-              const SizedBox(height: 12),
-              Text('分析任务: ${_controller.analysisJob!.id}'),
-              Text('状态: ${_controller.analysisJob!.status}'),
-              if (_controller.analysisJob!.summary.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(_controller.analysisJob!.summary),
-                ),
-            ],
-            if (_controller.report != null) ...<Widget>[
-              const SizedBox(height: 12),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF8FAFC),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: const Color(0xFFDCE3EA)),
-                ),
-                child: Text(_controller.report!.summary),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatusLogCard(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('状态日志', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            if (_controller.events.isEmpty) const Text('尚无日志'),
-            ..._controller.events.take(14).map(
-              (String item) => Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Text(item),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildTransportDiagnosticsCard(BuildContext context) {
-    final stats = _controller.transportStats;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(18),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text('Transport diagnostics', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            if (stats.isEmpty)
-              const Text('Waiting for firmware/server metrics.'),
-            for (final TransportStats item in stats) ...<Widget>[
-              Text('${item.source} ${item.deviceId.isEmpty ? '' : '· ${item.deviceId}'}'),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: <Widget>[
-                  _MetricChip(label: 'pub fail', value: '${item.publishFailCount}'),
-                  _MetricChip(label: 'crc', value: '${item.crcErrorCount}'),
-                  _MetricChip(label: 'decode', value: '${item.decodeErrorCount}'),
-                  _MetricChip(label: 'wifi', value: '${item.wifiReconnectCount}'),
-                  _MetricChip(label: 'latency', value: '${item.lastPublishLatencyMs} ms'),
-                ],
-              ),
-              const SizedBox(height: 8),
-              _buildStatsMap('queue', item.queueDepth),
-              _buildStatsMap('drop', item.dropCount),
-              _buildStatsMap('overwrite', item.overwriteCount),
-              const SizedBox(height: 12),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildStatsMap(String label, Map<String, int> values) {
-    if (values.isEmpty) {
-      return Text('$label: -');
-    }
-    final text = values.entries
-        .map((MapEntry<String, int> item) => '${item.key}=${item.value}')
-        .join('  ');
-    return Text('$label: $text');
-  }
-
-  Widget _buildWaveformArea(BuildContext context) {
-    final visibleChannels = _controller.visibleChannels;
-    return Column(
+    return _SidebarSection(
+      icon: Icons.tune,
+      title: '显示控制',
       children: <Widget>[
-        Card(
-          child: ListTile(
-            title: Text(_controller.session == null ? '等待开始监测' : '会话 ${_controller.session!.id}'),
-            subtitle: Text(
-              _controller.session == null
-                  ? '请先连接 MQTT / 蓝牙设备，或导入回放文件。'
-                  : '设备 ${_controller.session!.deviceId} | 模式 ${_controller.session!.sourceMode} | 通道 ${_controller.session!.channelKeys.join(', ')}',
-            ),
-            trailing: _MetricChip(label: '锚点', value: _controller.isPaused ? '暂停回看' : '实时最新'),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Expanded(
-          child: visibleChannels.isEmpty
-              ? Card(
-                  child: Center(
-                    child: Text(
-                      '暂无可显示的通道\n请先导入数据文件、连接 MQTT 或连接蓝牙设备',
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.titleMedium,
-                    ),
-                  ),
-                )
-              : ListView.separated(
-                  itemCount: visibleChannels.length + (_controller.report != null ? 1 : 0),
-                  separatorBuilder: (_, __) => const SizedBox(height: 16),
-                  itemBuilder: (BuildContext context, int index) {
-                    if (_controller.report != null && index == visibleChannels.length) {
-                      return _ReportCard(report: _controller.report!);
-                    }
-                    final channel = visibleChannels[index];
-                    final waveform = _controller.visibleWaveform(channel.key);
-                    return _WaveformCard(
-                      channel: channel,
-                      points: waveform.points,
-                      minValue: waveform.minValue,
-                      maxValue: waveform.maxValue,
-                      gain: _controller.gain,
-                      secondsPerScreen: _controller.secondsPerScreen,
-                      anchorTimestampMs: _controller.currentAnchorTimestampMs,
-                      summary: _controller.channelSummary(channel.key),
-                      runtime: _controller.channelRuntime(channel.key),
-                      enableHoverInspect: _controller.isPaused,
-                    );
-                  },
+        Row(
+          children: <Widget>[
+            SizedBox(
+              width: 34,
+              height: 34,
+              child: IconButton.filled(
+                onPressed: _controller.togglePause,
+                icon: Icon(_controller.isPaused ? Icons.play_arrow : Icons.pause, size: 16),
+                style: IconButton.styleFrom(
+                  backgroundColor: _controller.isPaused ? const Color(0xFFF4A261) : const Color(0xFF0B6E4F),
+                  foregroundColor: Colors.white,
+                  padding: EdgeInsets.zero,
                 ),
+                tooltip: _controller.isPaused ? '继续播放' : '暂停回看',
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                _controller.isPaused ? '已暂停 · 可回滚' : '实时播放中',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: _controller.isPaused ? const Color(0xFFF4A261) : const Color(0xFF2A9D8F),
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        _CompactSliderRow(
+          label: '时间窗',
+          value: _controller.secondsPerScreen,
+          min: 2,
+          max: 20,
+          divisions: 18,
+          unit: 's',
+          onChanged: _controller.setSecondsPerScreen,
+        ),
+        _CompactSliderRow(
+          label: '延迟',
+          value: _controller.liveDisplayLagSeconds,
+          min: 0,
+          max: 6,
+          divisions: 24,
+          unit: 's',
+          onChanged: _controller.setLiveDisplayLagSeconds,
+        ),
+        if (_controller.isPaused)
+          _CompactSliderRow(
+            label: '回滚',
+            value: historySliderValue,
+            min: 0,
+            max: historySliderMax,
+            unit: 's',
+            onChanged: _controller.canRollbackHistory ? _controller.setHistoryOffsetSeconds : null,
+          ),
+        _CompactSliderRow(
+          label: '增益',
+          value: _controller.gain,
+          min: 0.5,
+          max: 4,
+          divisions: 14,
+          unit: 'x',
+          onChanged: _controller.setGain,
         ),
       ],
     );
   }
+
+  // ── 3. 通道 ────────────────────────────────────────────────────
+
+  Widget _buildChannelBlock(BuildContext context) {
+    final catalog = _controller.channelCatalog;
+    if (catalog.isEmpty) {
+      return _SidebarSection(
+        icon: Icons.graphic_eq,
+        title: '通道',
+        children: <Widget>[
+          Text('尚未收到通道目录，请先连接设备或导入文件', style: Theme.of(context).textTheme.bodySmall),
+        ],
+      );
+    }
+    final mainChannels = catalog.where((ChannelDescriptor c) => _isMainChannel(c.key)).toList();
+    final otherChannels = catalog.where((ChannelDescriptor c) => !_isMainChannel(c.key)).toList();
+
+    return _SidebarSection(
+      icon: Icons.graphic_eq,
+      title: '通道',
+      children: <Widget>[
+        for (final ChannelDescriptor channel in mainChannels)
+          _ChannelToggle(
+            channel: channel,
+            onChanged: (bool v) => _controller.toggleChannel(channel.key, v),
+          ),
+        if (otherChannels.isNotEmpty)
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            dense: true,
+            shape: const Border(),
+            collapsedShape: const Border(),
+            title: Text('其他通道 (${otherChannels.length})', style: Theme.of(context).textTheme.bodySmall),
+            children: otherChannels.map((ChannelDescriptor channel) => _ChannelToggle(
+              channel: channel,
+              onChanged: (bool v) => _controller.toggleChannel(channel.key, v),
+            )).toList(),
+          ),
+      ],
+    );
+  }
+
+  // ── 4. 本地摘要 ────────────────────────────────────────────────
+
+  bool _isMainChannel(String key) =>
+      key == 'ecg_filtered' || key == 'ecg' || key == 'ppg_ir_filtered' ||
+      key == 'ppg_ir' || key == 'ppg_red_filtered' || key == 'ppg_red';
+
+  Widget _buildLocalSummaryBlock(BuildContext context) {
+    final analysis = _controller.localAnalysis;
+    final physio = analysis.physio;
+    return _SidebarSection(
+      icon: Icons.analytics_outlined,
+      title: '本地摘要',
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            _MetricChip(label: '通道', value: '${analysis.activeChannels}'),
+            const SizedBox(width: 4),
+            _MetricChip(label: '时长', value: '${analysis.durationSeconds.toStringAsFixed(1)} s'),
+            const SizedBox(width: 4),
+            _MetricChip(label: '质量', value: '${(analysis.meanQuality * 100).toStringAsFixed(0)} %'),
+          ],
+        ),
+        if (physio.hasAny) ...<Widget>[
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 4,
+            runSpacing: 4,
+            children: <Widget>[
+              if (physio.heartRateBpm != null) _MetricChip(label: 'HR', value: '${physio.heartRateBpm!.toStringAsFixed(1)} BPM'),
+              if (physio.spo2Percent != null) _MetricChip(label: 'SpO₂', value: '${physio.spo2Percent!.toStringAsFixed(1)} %'),
+              if (physio.respiratoryRateBpm != null) _MetricChip(label: '呼吸', value: '${physio.respiratoryRateBpm!.toStringAsFixed(1)} /min'),
+              if (physio.hrvRmssd != null) _MetricChip(label: 'RMSSD', value: '${physio.hrvRmssd!.toStringAsFixed(1)} ms'),
+              if (physio.temperatureCelsius != null) _MetricChip(label: '体温', value: '${physio.temperatureCelsius!.toStringAsFixed(2)} °C'),
+            ],
+          ),
+        ],
+        if (analysis.findings.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 6),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            dense: true,
+            shape: const Border(),
+            collapsedShape: const Border(),
+            title: Text('查看详细统计', style: Theme.of(context).textTheme.bodySmall),
+            initiallyExpanded: _detailStatsOpen,
+            onExpansionChanged: (v) => setState(() => _detailStatsOpen = v),
+            children: <Widget>[
+              ...analysis.findings.take(4).map((String item) => Padding(
+                padding: const EdgeInsets.only(bottom: 3),
+                child: _FindingTile(text: item),
+              )),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ── 5. 智能分析（云端 + Agent 合并）────────────────────────────
+
+  Widget _buildSmartAnalysisBlock(BuildContext context) {
+    final agent = _controller.agentStatus;
+    final agentEnabled = agent.state != AgentState.idle || _controller.isConnected;
+
+    return _SidebarSection(
+      icon: Icons.psychology_alt_outlined,
+      title: '智能分析',
+      children: <Widget>[
+        _buildTextField('云端地址', _cloudController, (String value) {
+          _controller.updateCloudBaseUrl(value);
+        }),
+        const SizedBox(height: 6),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: FilledButton.tonalIcon(
+                onPressed: _controller.uploadAndAnalyze,
+                icon: const Icon(Icons.cloud_upload_outlined, size: 14),
+                label: const Text('上传并分析', style: TextStyle(fontSize: 12)),
+              ),
+            ),
+            if (_controller.latestSegment != null) ...<Widget>[
+              const SizedBox(width: 6),
+              Expanded(
+                child: FilledButton.tonalIcon(
+                  onPressed: _controller.analyzeLatestSegment,
+                  icon: const Icon(Icons.auto_awesome_outlined, size: 14),
+                  label: const Text('AI 分析 20s', style: TextStyle(fontSize: 12)),
+                ),
+              ),
+            ],
+          ],
+        ),
+        if (_controller.uploadTask != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text('上传: ${_controller.uploadTask!.status}', style: Theme.of(context).textTheme.bodySmall),
+          ),
+        if (_controller.analysisJob != null)
+          Text('分析: ${_controller.analysisJob!.status}', style: Theme.of(context).textTheme.bodySmall),
+        const SizedBox(height: 8),
+        _SidebarSubDivider(),
+        Row(
+          children: <Widget>[
+            Icon(Icons.smart_toy_outlined, size: 14, color: _agentStateColor(agent.state)),
+            const SizedBox(width: 4),
+            Text('长期监测 Agent', style: Theme.of(context).textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600)),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: _agentStateColor(agent.state).withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                agent.stateLabel,
+                style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: _agentStateColor(agent.state)),
+              ),
+            ),
+            const SizedBox(width: 4),
+            SizedBox(
+              width: 36,
+              height: 24,
+              child: Switch(
+                value: agentEnabled,
+                onChanged: (bool v) => _controller.toggleAgentAutoAnalyze(v),
+              ),
+            ),
+          ],
+        ),
+        if (agent.lastAnalysisTime != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text('最近分析: ${_formatDateTime(agent.lastAnalysisTime!)}', style: Theme.of(context).textTheme.bodySmall),
+          ),
+        if (agent.riskLevel != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: _riskColor(agent.riskLevel).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    agent.riskLabel,
+                    style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: _riskColor(agent.riskLevel)),
+                  ),
+                ),
+                if (agent.confidence != null) ...<Widget>[
+                  const SizedBox(width: 6),
+                  Text('置信度 ${(agent.confidence! * 100).toStringAsFixed(0)}%', style: Theme.of(context).textTheme.bodySmall),
+                ],
+              ],
+            ),
+          ),
+        if (agent.summary.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text(agent.summary, style: Theme.of(context).textTheme.bodySmall, maxLines: 2, overflow: TextOverflow.ellipsis),
+          ),
+        if (agent.isHighRisk) ...<Widget>[
+          const SizedBox(height: 6),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFEDED),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFE63946).withValues(alpha: 0.3)),
+            ),
+            child: Row(
+              children: <Widget>[
+                const Icon(Icons.warning_amber_rounded, size: 14, color: Color(0xFFE63946)),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text('高风险预警', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Color(0xFFE63946))),
+                ),
+                TextButton(
+                  onPressed: () => _showAgentDetailDialog(context),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                  child: const Text('详情', style: TextStyle(fontSize: 10)),
+                ),
+                TextButton(
+                  onPressed: () => _controller.acknowledgeAgentAlert(),
+                  style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 6), minimumSize: Size.zero, tapTargetSize: MaterialTapTargetSize.shrinkWrap),
+                  child: const Text('知晓', style: TextStyle(fontSize: 10)),
+                ),
+              ],
+            ),
+          ),
+        ],
+        if (agent.notificationText.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 4),
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            dense: true,
+            shape: const Border(),
+            collapsedShape: const Border(),
+            title: Text('亲属通知文案预览', style: Theme.of(context).textTheme.bodySmall),
+            children: <Widget>[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF8F0),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFE8C8A0)),
+                ),
+                child: Text(agent.notificationText, style: const TextStyle(fontSize: 10, height: 1.4)),
+              ),
+            ],
+          ),
+        ],
+        const SizedBox(height: 4),
+        Text(
+          '辅助预警，不构成医疗诊断',
+          style: TextStyle(fontSize: 9, color: Colors.grey[400]),
+        ),
+      ],
+    );
+  }
+
+  // ── 6. 诊断日志（默认折叠）─────────────────────────────────────
+
+  Widget _buildDiagnosticsBlock(BuildContext context) {
+    final stats = _controller.transportStats;
+    final events = _controller.events;
+    final hasErrors = stats.any((TransportStats s) =>
+        s.publishFailCount > 0 || s.crcErrorCount > 0 || s.decodeErrorCount > 0) ||
+        events.isNotEmpty && events.first.contains('失败');
+
+    return _SidebarSection(
+      icon: Icons.terminal,
+      title: '诊断日志',
+      trailing: hasErrors
+          ? Container(
+              width: 6,
+              height: 6,
+              decoration: const BoxDecoration(color: Color(0xFFF4A261), shape: BoxShape.circle),
+            )
+          : null,
+      children: <Widget>[
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          dense: true,
+          shape: const Border(),
+          collapsedShape: const Border(),
+          initiallyExpanded: _diagnosticsLogOpen,
+          onExpansionChanged: (v) => setState(() => _diagnosticsLogOpen = v),
+          title: Text(
+            hasErrors ? '有异常，点击展开' : '点击展开',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+          children: <Widget>[
+            if (stats.isNotEmpty) ...<Widget>[
+              for (final TransportStats item in stats) ...<Widget>[
+                Text('${item.source}${item.deviceId.isEmpty ? '' : ' · ${item.deviceId}'}', style: Theme.of(context).textTheme.bodySmall),
+                const SizedBox(height: 3),
+                Wrap(
+                  spacing: 4,
+                  runSpacing: 3,
+                  children: <Widget>[
+                    _MetricChip(label: 'pub fail', value: '${item.publishFailCount}'),
+                    _MetricChip(label: 'crc', value: '${item.crcErrorCount}'),
+                    _MetricChip(label: 'latency', value: '${item.lastPublishLatencyMs} ms'),
+                  ],
+                ),
+                const SizedBox(height: 4),
+              ],
+            ],
+            if (events.isEmpty)
+              Text('尚无日志', style: Theme.of(context).textTheme.bodySmall)
+            else
+              ...events.take(8).map((String item) => Padding(
+                padding: const EdgeInsets.only(bottom: 2),
+                child: Text(item, style: const TextStyle(fontSize: 10, height: 1.3, color: Color(0xFF6B7C72))),
+              )),
+          ],
+        ),
+      ],
+    );
+  }
+
+  void _showAgentDetailDialog(BuildContext context) {
+    final agent = _controller.agentStatus;
+    final report = _controller.report;
+    showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => AlertDialog(
+        title: const Text('Agent 分析依据'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              if (agent.riskLevel != null)
+                Text('风险等级: ${agent.riskLabel}'),
+              if (agent.confidence != null)
+                Text('置信度: ${(agent.confidence! * 100).toStringAsFixed(0)}%'),
+              const SizedBox(height: 8),
+              if (agent.summary.isNotEmpty) Text(agent.summary),
+              if (report != null && report.findings.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 12),
+                const Text('主要发现:', style: TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 4),
+                for (final f in report.findings)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Text('· ${f.title}: ${f.detail}'),
+                  ),
+              ],
+              const SizedBox(height: 12),
+              const Text('辅助预警，不构成医疗诊断。', style: TextStyle(fontStyle: FontStyle.italic, fontSize: 12)),
+            ],
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _agentStateColor(AgentState state) {
+    switch (state) {
+      case AgentState.idle:
+        return const Color(0xFF8D99AE);
+      case AgentState.analyzing:
+        return const Color(0xFF457B9D);
+      case AgentState.normal:
+        return const Color(0xFF2A9D8F);
+      case AgentState.warning:
+        return const Color(0xFFF4A261);
+      case AgentState.highRisk:
+        return const Color(0xFFE63946);
+      case AgentState.error:
+        return const Color(0xFFE63946);
+    }
+  }
+
+  Color _riskColor(String? level) {
+    switch (level) {
+      case 'high':
+        return const Color(0xFFE63946);
+      case 'medium':
+        return const Color(0xFFF4A261);
+      case 'low':
+        return const Color(0xFF2A9D8F);
+      default:
+        return const Color(0xFF8D99AE);
+    }
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────
 
   Widget _buildTextField(String label, TextEditingController controller, ValueChanged<String> onChanged, {bool obscureText = false}) {
     return TextField(
@@ -751,8 +1047,6 @@ class _DashboardPageState extends State<DashboardPage> {
       onChanged: onChanged,
       decoration: InputDecoration(
         labelText: label,
-        border: const OutlineInputBorder(),
-        isDense: true,
       ),
     );
   }
@@ -771,7 +1065,166 @@ class _DashboardPageState extends State<DashboardPage> {
     _controller.updateCloudBaseUrl(_cloudController.text.trim());
     _controller.updateUserName(_userNameController.text.trim());
   }
+
+  String _formatDateTime(DateTime dt) {
+    return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+  }
 }
+
+// ── Sidebar helper widgets ─────────────────────────────────────────
+
+class _SidebarSection extends StatelessWidget {
+  const _SidebarSection({
+    required this.icon,
+    required this.title,
+    this.trailing,
+    required this.children,
+  });
+
+  final IconData icon;
+  final String title;
+  final Widget? trailing;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Icon(icon, size: 14, color: const Color(0xFF0B6E4F)),
+            const SizedBox(width: 6),
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            const Spacer(),
+            if (trailing != null) trailing!,
+          ],
+        ),
+        const SizedBox(height: 8),
+        ...children,
+      ],
+    );
+  }
+}
+
+class _SidebarDivider extends StatelessWidget {
+  const _SidebarDivider();
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Divider(height: 1, color: const Color(0xFFD0D8D3).withValues(alpha: 0.5)),
+    );
+  }
+}
+
+class _SidebarSubDivider extends StatelessWidget {
+  const _SidebarSubDivider();
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Divider(height: 1, color: const Color(0xFFD0D8D3).withValues(alpha: 0.3)),
+    );
+  }
+}
+
+class _CompactSliderRow extends StatelessWidget {
+  const _CompactSliderRow({
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    this.divisions,
+    required this.unit,
+    required this.onChanged,
+  });
+
+  final String label;
+  final double value;
+  final double min;
+  final double max;
+  final int? divisions;
+  final String unit;
+  final ValueChanged<double>? onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: <Widget>[
+        SizedBox(
+          width: 56,
+          child: Text(label, style: Theme.of(context).textTheme.bodySmall),
+        ),
+        Expanded(
+          child: Slider(
+            value: value,
+            min: min,
+            max: max,
+            divisions: divisions,
+            onChanged: onChanged,
+          ),
+        ),
+        SizedBox(
+          width: 40,
+          child: Text(
+            '${value.toStringAsFixed(1)} $unit',
+            style: Theme.of(context).textTheme.bodySmall,
+            textAlign: TextAlign.right,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _StatusItem {
+  const _StatusItem(this.label, this.value, {this.highlight = false});
+
+  final String label;
+  final String value;
+  final bool highlight;
+}
+
+class _CompactStatusRow extends StatelessWidget {
+  const _CompactStatusRow({required this.items});
+
+  final List<_StatusItem> items;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: items.map((_StatusItem item) {
+        return Padding(
+          padding: const EdgeInsets.only(right: 10),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(
+                '${item.label} ',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: item.highlight ? const Color(0xFFE63946) : const Color(0xFF6B7C72),
+                ),
+              ),
+              Text(
+                item.value,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: item.highlight ? const Color(0xFFE63946) : const Color(0xFF2A3B32),
+                ),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
+// ── Private widget classes ─────────────────────────────────────────
+
 class _StatusBadge extends StatelessWidget {
   const _StatusBadge({required this.status});
 
@@ -779,28 +1232,73 @@ class _StatusBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    Color background;
+    Color bg;
+    Color fg;
     switch (status.state) {
       case AdapterState.streaming:
-        background = const Color(0xFFD7F9E9);
+        bg = Colors.white.withValues(alpha: 0.2);
+        fg = Colors.white;
         break;
       case AdapterState.connected:
-        background = const Color(0xFFE6F4FF);
+        bg = Colors.white.withValues(alpha: 0.15);
+        fg = Colors.white70;
         break;
       case AdapterState.error:
-        background = const Color(0xFFFFE5E5);
+        bg = const Color(0xFFE63946).withValues(alpha: 0.3);
+        fg = Colors.white;
         break;
       default:
-        background = const Color(0xFFF1F3F5);
+        bg = Colors.white.withValues(alpha: 0.1);
+        fg = Colors.white60;
         break;
     }
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(999),
+        color: bg,
+        borderRadius: BorderRadius.circular(8),
       ),
-      child: Text(status.message),
+      child: Text(status.message, style: TextStyle(color: fg, fontSize: 12, fontWeight: FontWeight.w500)),
+    );
+  }
+}
+
+class _VitalChip extends StatelessWidget {
+  const _VitalChip({
+    required this.icon,
+    required this.color,
+    required this.label,
+    required this.value,
+    required this.unit,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String label;
+  final String value;
+  final String unit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(label, style: TextStyle(fontSize: 11, color: color.withValues(alpha: 0.8))),
+          const SizedBox(width: 4),
+          Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color)),
+          const SizedBox(width: 2),
+          Text(unit, style: TextStyle(fontSize: 10, color: color.withValues(alpha: 0.7))),
+        ],
+      ),
     );
   }
 }
@@ -814,13 +1312,13 @@ class _MetricChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
       decoration: BoxDecoration(
-        color: const Color(0xFFF6FBF8),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0xFFD5E7DD)),
+        color: const Color(0xFFF5F8F6),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFD5E7DD).withValues(alpha: 0.6)),
       ),
-      child: Text('$label  $value'),
+      child: Text('$label  $value', style: const TextStyle(fontSize: 11)),
     );
   }
 }
@@ -834,16 +1332,52 @@ class _FindingTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(8),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: const Color(0xFFDCE3EA)),
+        color: const Color(0xFFF5F8F6),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFDCE3EA).withValues(alpha: 0.5)),
       ),
-      child: Text(text),
+      child: Text(text, style: const TextStyle(fontSize: 11, height: 1.3)),
     );
   }
 }
+
+class _ChannelToggle extends StatelessWidget {
+  const _ChannelToggle({required this.channel, required this.onChanged});
+
+  final ChannelDescriptor channel;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: <Widget>[
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              color: colorFromHex(channel.colorHex),
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text('${channel.label} (${channel.unit})', style: const TextStyle(fontSize: 12)),
+          ),
+          Switch(
+            value: channel.enabled,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Waveform card (monitor style) ─────────────────────────────────
 
 class _WaveformCard extends StatefulWidget {
   const _WaveformCard({
@@ -895,186 +1429,215 @@ class _WaveformCardState extends State<_WaveformCard> {
     final estimatedRate = _safeNullableDouble(widget.summary['estimatedRateBpm']);
     final runtime = widget.runtime;
     final healthText = runtime.healthText(widget.anchorTimestampMs);
-    final lagSeconds = runtime.lagBehindAnchorSeconds(widget.anchorTimestampMs);
-    final idleSeconds = runtime.idleSeconds();
     final viewport = _resolveStableViewport(_targetViewport());
+    final channelColor = colorFromHex(widget.channel.colorHex);
 
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFF0D1B2A),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+            child: Row(
               children: <Widget>[
-                CircleAvatar(
-                  radius: 8,
-                  backgroundColor: colorFromHex(widget.channel.colorHex),
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: channelColor,
+                    shape: BoxShape.circle,
+                  ),
                 ),
-                const SizedBox(width: 10),
-                Text('${widget.channel.label} (${widget.channel.unit})', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(width: 8),
+                Text(
+                  widget.channel.label,
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: channelColor.withValues(alpha: 0.9)),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  '(${widget.channel.unit})',
+                  style: TextStyle(fontSize: 10, color: channelColor.withValues(alpha: 0.5)),
+                ),
                 const Spacer(),
-                Text('${widget.channel.sampleRate.toStringAsFixed(1)} Hz · $healthText'),
+                Text(
+                  '${widget.channel.sampleRate.toStringAsFixed(0)} Hz',
+                  style: TextStyle(fontSize: 10, color: Colors.teal[200]!.withValues(alpha: 0.5)),
+                ),
+                const SizedBox(width: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: _healthColor(healthText).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  child: Text(
+                    healthText,
+                    style: TextStyle(fontSize: 10, color: _healthColor(healthText)),
+                  ),
+                ),
               ],
             ),
-            const SizedBox(height: 8),
-            Text(
-              '样本 ${widget.summary['samples'] ?? 0} | 帧 ${runtime.receivedFrames} | 缺包 ${runtime.missingFrames} | 断档 ${runtime.sampleGapEvents} | 空闲 ${idleSeconds.toStringAsFixed(1)} s | 滞后 ${lagSeconds.toStringAsFixed(1)} s',
+          ),
+          if (widget.enableHoverInspect && _hoverInfo != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+              child: Text(
+                '${_hoverInfo!.sample.value.toStringAsFixed(4)} ${widget.channel.unit} @ ${_formatTimestamp(_hoverInfo!.sample.timestampMs)}',
+                style: TextStyle(fontSize: 10, color: Colors.teal[100]!.withValues(alpha: 0.7)),
+              ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              '均值 ${_safeDouble(widget.summary['mean']).toStringAsFixed(3)} | 范围 ${_safeDouble(widget.summary['min']).toStringAsFixed(3)} ~ ${_safeDouble(widget.summary['max']).toStringAsFixed(3)}${estimatedRate == null ? '' : ' | 节律 ${estimatedRate.toStringAsFixed(1)} BPM'}',
-            ),
-            const SizedBox(height: 8),
-            Text(
-              widget.enableHoverInspect
-                  ? (_hoverInfo == null
-                      ? '暂停回看中：鼠标移动到波形上可查看当前点位数值。'
-                      : '游标值 ${_hoverInfo!.sample.value.toStringAsFixed(4)} ${widget.channel.unit} @ ${_formatTimestamp(_hoverInfo!.sample.timestampMs)}')
-                  : '实时滚动中：已关闭鼠标取值以降低绘图压力。',
-            ),
-            const SizedBox(height: 12),
-            SizedBox(
-              height: 220,
-              child: LayoutBuilder(
-                builder: (BuildContext context, BoxConstraints constraints) {
-                  final width = constraints.maxWidth;
-                  const height = 220.0;
-                  return MouseRegion(
-                    onExit: (_) {
-                      if (_hoverInfo != null) {
-                        setState(() {
-                          _hoverInfo = null;
-                        });
-                      }
-                    },
-                    onHover: (event) {
-                      if (!widget.enableHoverInspect) {
-                        return;
-                      }
-                      final nowMs = DateTime.now().millisecondsSinceEpoch;
-                      if (nowMs - _lastHoverUpdateMs < 120) {
-                        return;
-                      }
-                      _lastHoverUpdateMs = nowMs;
-                      final nextHover = _resolveHover(
-                        localPosition: event.localPosition,
-                        width: width,
-                        height: height,
-                      );
-                      if (_hoverEquals(_hoverInfo, nextHover)) {
-                        return;
-                      }
-                      setState(() {
-                        _hoverInfo = nextHover;
-                      });
-                    },
-                    child: Stack(
-                      children: <Widget>[
-                        Positioned.fill(
-                          child: RepaintBoundary(
-                            child: CustomPaint(
+          SizedBox(
+            height: 200,
+            child: LayoutBuilder(
+              builder: (BuildContext context, BoxConstraints constraints) {
+                final width = constraints.maxWidth;
+                const height = 200.0;
+                return MouseRegion(
+                  onExit: (_) {
+                    if (_hoverInfo != null) setState(() => _hoverInfo = null);
+                  },
+                  onHover: (event) {
+                    if (!widget.enableHoverInspect) return;
+                    final nowMs = DateTime.now().millisecondsSinceEpoch;
+                    if (nowMs - _lastHoverUpdateMs < 120) return;
+                    _lastHoverUpdateMs = nowMs;
+                    final nextHover = _resolveHover(
+                      localPosition: event.localPosition,
+                      width: width,
+                      height: height,
+                    );
+                    if (_hoverEquals(_hoverInfo, nextHover)) return;
+                    setState(() => _hoverInfo = nextHover);
+                  },
+                  child: Stack(
+                    children: <Widget>[
+                      Positioned.fill(
+                        child: RepaintBoundary(
+                          child: CustomPaint(
                             painter: _WaveformPainter(
                               points: widget.points,
                               viewport: viewport,
-                              color: colorFromHex(widget.channel.colorHex),
+                              color: channelColor,
                               gain: widget.gain,
                               secondsPerScreen: widget.secondsPerScreen,
                               anchorTimestampMs: widget.anchorTimestampMs,
                               showLabels: widget.enableHoverInspect,
                             ),
                             child: widget.points.isEmpty
-                                ? const Center(child: Text('当前窗口暂无数据'))
+                                ? Center(
+                                    child: Text(
+                                      '当前窗口暂无数据',
+                                      style: TextStyle(color: Colors.teal[200]!.withValues(alpha: 0.4), fontSize: 12),
+                                    ),
+                                  )
                                 : const SizedBox.expand(),
                           ),
+                        ),
+                      ),
+                      if (_hoverInfo != null) ...<Widget>[
+                        Positioned(
+                          left: _hoverInfo!.localDx - 0.5,
+                          top: 0,
+                          bottom: 0,
+                          child: Container(width: 1, color: Colors.teal[100]!.withValues(alpha: 0.4)),
+                        ),
+                        Positioned(
+                          left: _hoverInfo!.localDx - 4,
+                          top: _hoverInfo!.localDy - 4,
+                          child: IgnorePointer(
+                            child: Container(
+                              width: 8,
+                              height: 8,
+                              decoration: BoxDecoration(
+                                color: channelColor,
+                                shape: BoxShape.circle,
+                                border: Border.all(color: Colors.white, width: 1.5),
+                              ),
+                            ),
                           ),
                         ),
-                        if (_hoverInfo != null) ...<Widget>[
-                          Positioned(
-                            left: _hoverInfo!.localDx - 0.5,
-                            top: 0,
-                            bottom: 0,
-                            child: Container(width: 1, color: const Color(0xFF51606B)),
-                          ),
-                          Positioned(
-                            left: _hoverInfo!.localDx - 4,
-                            top: _hoverInfo!.localDy - 4,
-                            child: IgnorePointer(
-                              child: Container(
-                                width: 8,
-                                height: 8,
-                                decoration: BoxDecoration(
-                                  color: colorFromHex(widget.channel.colorHex),
-                                  shape: BoxShape.circle,
+                        Positioned(
+                          left: _bubbleLeft(_hoverInfo!, width),
+                          top: _bubbleTop(_hoverInfo!, height),
+                          child: IgnorePointer(
+                            child: Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF1A2F3A),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: channelColor.withValues(alpha: 0.3)),
+                              ),
+                              child: DefaultTextStyle(
+                                style: TextStyle(color: Colors.teal[100], fontSize: 10),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: <Widget>[
+                                    Text(_formatTimestamp(_hoverInfo!.sample.timestampMs)),
+                                    const SizedBox(height: 2),
+                                    Text('${_hoverInfo!.sample.value.toStringAsFixed(4)} ${widget.channel.unit}'),
+                                  ],
                                 ),
                               ),
                             ),
                           ),
-                          Positioned(
-                            left: _bubbleLeft(_hoverInfo!, width),
-                            top: _bubbleTop(_hoverInfo!, height),
-                            child: IgnorePointer(
-                              child: Container(
-                                width: 156,
-                                padding: const EdgeInsets.all(10),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFF132A13),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                                child: DefaultTextStyle(
-                                  style: const TextStyle(color: Colors.white, fontSize: 11),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: <Widget>[
-                                      Text(_formatTimestamp(_hoverInfo!.sample.timestampMs)),
-                                      const SizedBox(height: 4),
-                                      Text('${_hoverInfo!.sample.value.toStringAsFixed(4)} ${widget.channel.unit}'),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
+                        ),
                       ],
-                    ),
-                  );
-                },
-              ),
+                    ],
+                  ),
+                );
+              },
             ),
-          ],
-        ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+            child: Row(
+              children: <Widget>[
+                Text(
+                  '样本 ${widget.summary['samples'] ?? 0} | 帧 ${runtime.receivedFrames}',
+                  style: TextStyle(fontSize: 10, color: Colors.teal[200]!.withValues(alpha: 0.4)),
+                ),
+                const Spacer(),
+                if (estimatedRate != null)
+                  Text(
+                    '${estimatedRate.toStringAsFixed(1)} BPM',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: channelColor),
+                  ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  HoverSampleInfo? _resolveHover({required Offset localPosition, required double width, required double height}) {
-    if (widget.points.isEmpty || width <= 0 || height <= 0) {
-      return null;
-    }
+  Color _healthColor(String text) {
+    if (text.contains('滞后') || text.contains('断档')) return const Color(0xFFF4A261);
+    if (text == '实时') return const Color(0xFF2A9D8F);
+    return const Color(0xFF8D99AE);
+  }
 
+  HoverSampleInfo? _resolveHover({required Offset localPosition, required double width, required double height}) {
+    if (widget.points.isEmpty || width <= 0 || height <= 0) return null;
     final windowMs = (widget.secondsPerScreen * 1000).round();
     final startMs = widget.anchorTimestampMs - windowMs;
     final chartWidth = math.max(1.0, width - _waveformYAxisWidth);
-    final clampedDx = (localPosition.dx - _waveformYAxisWidth).clamp(
-      0.0,
-      chartWidth,
-    );
+    final clampedDx = (localPosition.dx - _waveformYAxisWidth).clamp(0.0, chartWidth);
     final targetMs = startMs + (clampedDx / chartWidth * windowMs).round();
     final sample = _nearestSample(widget.points, targetMs);
     final viewport = _stableViewport ?? _targetViewport();
     final sampleDx = _waveformYAxisWidth +
         ((sample.timestampMs - startMs) / windowMs).clamp(0.0, 1.0) * chartWidth;
     final sampleDy = viewport.dyForValue(value: sample.value, gain: widget.gain, height: height);
-
     return HoverSampleInfo(sample: sample, localDx: sampleDx, localDy: sampleDy);
   }
 
   _WaveformViewport _targetViewport() {
-    return _WaveformViewport.fromBounds(
-      minValue: widget.minValue,
-      maxValue: widget.maxValue,
-    );
+    return _WaveformViewport.fromBounds(minValue: widget.minValue, maxValue: widget.maxValue);
   }
 
   _WaveformViewport _resolveStableViewport(_WaveformViewport target) {
@@ -1083,93 +1646,60 @@ class _WaveformCardState extends State<_WaveformCard> {
       _stableViewport = target;
       return target;
     }
-
-    final previousMin = previous.minLabel;
-    final previousMax = previous.maxLabel;
-    final targetMin = target.minLabel;
-    final targetMax = target.maxLabel;
-    final nextMin = targetMin < previousMin
-        ? targetMin
-        : previousMin + (targetMin - previousMin) * 0.08;
-    final nextMax = targetMax > previousMax
-        ? targetMax
-        : previousMax + (targetMax - previousMax) * 0.08;
-    _stableViewport = _WaveformViewport.fromLabelBounds(
-      minLabel: nextMin,
-      maxLabel: nextMax,
-    );
+    final nextMin = target.minLabel < previous.minLabel
+        ? target.minLabel
+        : previous.minLabel + (target.minLabel - previous.minLabel) * 0.08;
+    final nextMax = target.maxLabel > previous.maxLabel
+        ? target.maxLabel
+        : previous.maxLabel + (target.maxLabel - previous.maxLabel) * 0.08;
+    _stableViewport = _WaveformViewport.fromLabelBounds(minLabel: nextMin, maxLabel: nextMax);
     return _stableViewport!;
   }
 
   SamplePoint _nearestSample(List<SamplePoint> points, int targetTimestampMs) {
-    if (points.length == 1) {
-      return points.first;
-    }
+    if (points.length == 1) return points.first;
     var low = 0;
     var high = points.length - 1;
     while (low <= high) {
       final mid = (low + high) ~/ 2;
       final current = points[mid].timestampMs;
-      if (current == targetTimestampMs) {
-        return points[mid];
-      }
+      if (current == targetTimestampMs) return points[mid];
       if (current < targetTimestampMs) {
         low = mid + 1;
       } else {
         high = mid - 1;
       }
     }
-
-    if (low >= points.length) {
-      return points.last;
-    }
-    if (high < 0) {
-      return points.first;
-    }
-
+    if (low >= points.length) return points.last;
+    if (high < 0) return points.first;
     final lowPoint = points[low];
     final highPoint = points[high];
     return (lowPoint.timestampMs - targetTimestampMs).abs() < (highPoint.timestampMs - targetTimestampMs).abs() ? lowPoint : highPoint;
   }
+
   bool _hoverEquals(HoverSampleInfo? a, HoverSampleInfo? b) {
-    if (a == null || b == null) {
-      return a == b;
-    }
+    if (a == null || b == null) return a == b;
     return a.sample.timestampMs == b.sample.timestampMs;
   }
 
   double _bubbleLeft(HoverSampleInfo info, double width) {
-    return math.min(math.max(8, info.localDx + 12), math.max(8, width - 164));
+    return math.min(math.max(8, info.localDx + 12), math.max(8, width - 150));
   }
 
   double _bubbleTop(HoverSampleInfo info, double height) {
-    final preferred = info.localDy < 72 ? info.localDy + 12 : info.localDy - 62;
-    return math.min(math.max(8, preferred), math.max(8, height - 64));
+    final preferred = info.localDy < 72 ? info.localDy + 12 : info.localDy - 52;
+    return math.min(math.max(8, preferred), math.max(8, height - 56));
   }
 
   String _formatTimestamp(int timestampMs) {
     final time = DateTime.fromMillisecondsSinceEpoch(timestampMs);
-    final hh = time.hour.toString().padLeft(2, '0');
-    final mm = time.minute.toString().padLeft(2, '0');
-    final ss = time.second.toString().padLeft(2, '0');
-    final mmm = time.millisecond.toString().padLeft(3, '0');
-    return '$hh:$mm:$ss.$mmm';
+    return '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}:${time.second.toString().padLeft(2, '0')}.${time.millisecond.toString().padLeft(3, '0')}';
   }
 
-  double _safeDouble(dynamic value) {
-    if (value is num) {
-      return value.toDouble();
-    }
-    return 0;
-  }
-
-  double? _safeNullableDouble(dynamic value) {
-    if (value is num) {
-      return value.toDouble();
-    }
-    return null;
-  }
+  double? _safeNullableDouble(dynamic value) => value is num ? value.toDouble() : null;
 }
+
+// ── Waveform painter (monitor dark style) ──────────────────────────
 
 class _WaveformPainter extends CustomPainter {
   _WaveformPainter({
@@ -1192,16 +1722,16 @@ class _WaveformPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final backgroundPaint = Paint()..color = const Color(0xFFF9FBFA);
+    final backgroundPaint = Paint()..color = const Color(0xFF0D1B2A);
     final gridPaint = Paint()
-      ..color = const Color(0xFFD8E2DC)
+      ..color = const Color(0xFF1A3040)
       ..strokeWidth = 1;
     final axisPaint = Paint()
-      ..color = const Color(0xFFA9BBB2)
-      ..strokeWidth = 1.2;
+      ..color = const Color(0xFF2A4A5A)
+      ..strokeWidth = 1;
     final midlinePaint = Paint()
-      ..color = const Color(0xFFB8C7C0)
-      ..strokeWidth = 1.4;
+      ..color = const Color(0xFF1E3A4A)
+      ..strokeWidth = 1.2;
     final signalPaint = Paint()
       ..color = color
       ..strokeWidth = 1.5
@@ -1209,7 +1739,7 @@ class _WaveformPainter extends CustomPainter {
       ..isAntiAlias = false;
 
     final rect = Offset.zero & size;
-    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(14));
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(12));
     canvas.drawRRect(rrect, backgroundPaint);
     canvas.save();
     canvas.clipRRect(rrect);
@@ -1220,26 +1750,15 @@ class _WaveformPainter extends CustomPainter {
     final chartWidth = math.max(1.0, size.width - chartLeft);
     final chartRight = chartLeft + chartWidth;
 
-    canvas.drawLine(
-      Offset(chartLeft, 0),
-      Offset(chartLeft, size.height),
-      axisPaint,
-    );
+    canvas.drawLine(Offset(chartLeft, 0), Offset(chartLeft, size.height), axisPaint);
 
     for (var i = 0; i <= verticalDivisions; i++) {
       final dx = chartLeft + chartWidth * i / verticalDivisions;
       canvas.drawLine(Offset(dx, 0), Offset(dx, size.height), gridPaint);
-      final secondsLeft = secondsPerScreen - secondsPerScreen * i / verticalDivisions;
-      final labelDx = i == verticalDivisions
-          ? dx - 34
-          : dx + 4;
       if (showLabels) {
-        _drawLabel(
-          canvas,
-          size,
-          text: '-${secondsLeft.toStringAsFixed(1)}s',
-          offset: Offset(labelDx, size.height - 18),
-        );
+        final secondsLeft = secondsPerScreen - secondsPerScreen * i / verticalDivisions;
+        final labelDx = i == verticalDivisions ? dx - 34 : dx + 4;
+        _drawLabel(canvas, size, text: '-${secondsLeft.toStringAsFixed(1)}s', offset: Offset(labelDx, size.height - 16), color: const Color(0xFF4A6A7A));
       }
     }
 
@@ -1258,52 +1777,41 @@ class _WaveformPainter extends CustomPainter {
       Offset(chartRight, size.height / 2),
       midlinePaint,
     );
+
     for (var j = 0; j <= horizontalDivisions; j++) {
       final ratio = 1 - (j / horizontalDivisions);
       final labelValue = viewport.minLabel +
           (viewport.maxLabel - viewport.minLabel) * ratio;
       final dy = size.height * j / horizontalDivisions;
-      canvas.drawLine(
-        Offset(chartLeft - 6, dy),
-        Offset(chartLeft, dy),
-        axisPaint,
-      );
+      canvas.drawLine(Offset(chartLeft - 4, dy), Offset(chartLeft, dy), axisPaint);
       if (showLabels) {
         _drawLabel(
           canvas,
           size,
           text: labelValue.toStringAsFixed(2),
-          offset: Offset(6, (dy - 7).clamp(2.0, size.height - 18)),
+          offset: Offset(4, (dy - 7).clamp(2.0, size.height - 16)),
+          color: const Color(0xFF4A6A7A),
         );
       }
     }
 
     final windowMs = (secondsPerScreen * 1000).round();
     final startMs = anchorTimestampMs - windowMs;
-    final renderPoints = _downsamplePoints(
-      points,
-      maxPoints: math.max(96, size.width.round() * 2),
-    );
+    final renderPoints = _downsamplePoints(points, maxPoints: math.max(96, size.width.round() * 2));
     final offsets = renderPoints
-        .map(
-          (SamplePoint point) => Offset(
-            chartLeft + ((point.timestampMs - startMs) / windowMs) * chartWidth,
-            viewport.dyForValue(
-              value: point.value,
-              gain: gain,
-              height: size.height,
-            ),
-          ),
-        )
+        .map((SamplePoint point) => Offset(
+              chartLeft + ((point.timestampMs - startMs) / windowMs) * chartWidth,
+              viewport.dyForValue(value: point.value, gain: gain, height: size.height),
+            ))
         .toList(growable: false);
+
     final path = Path();
     final gapThresholdMs = math.max(250, math.min(1200, windowMs ~/ 10));
     var segmentStart = 0;
     for (var index = 1; index <= renderPoints.length; index++) {
       final isEnd = index == renderPoints.length;
       final hasGap = !isEnd &&
-          renderPoints[index].timestampMs - renderPoints[index - 1].timestampMs >
-              gapThresholdMs;
+          renderPoints[index].timestampMs - renderPoints[index - 1].timestampMs > gapThresholdMs;
       if (isEnd || hasGap) {
         _appendPathSegment(path, offsets, segmentStart, index);
         segmentStart = index;
@@ -1313,38 +1821,16 @@ class _WaveformPainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _appendPathSegment(
-    Path path,
-    List<Offset> offsets,
-    int start,
-    int endExclusive,
-  ) {
-    if (endExclusive <= start) {
-      return;
-    }
+  void _appendPathSegment(Path path, List<Offset> offsets, int start, int endExclusive) {
+    if (endExclusive <= start) return;
     path.moveTo(offsets[start].dx, offsets[start].dy);
-    if (endExclusive - start == 1) {
-      return;
-    }
-    if (endExclusive - start == 2) {
-      final last = offsets[endExclusive - 1];
-      path.lineTo(last.dx, last.dy);
-      return;
-    }
     for (var index = start + 1; index < endExclusive; index++) {
-      final current = offsets[index];
-      path.lineTo(current.dx, current.dy);
+      path.lineTo(offsets[index].dx, offsets[index].dy);
     }
   }
 
-  List<SamplePoint> _downsamplePoints(
-    List<SamplePoint> source, {
-    required int maxPoints,
-  }) {
-    if (source.length <= maxPoints) {
-      return source;
-    }
-
+  List<SamplePoint> _downsamplePoints(List<SamplePoint> source, {required int maxPoints}) {
+    if (source.length <= maxPoints) return source;
     final chunkSize = math.max(1, (source.length / maxPoints).ceil());
     final reduced = <SamplePoint>[];
     for (var start = 0; start < source.length; start += chunkSize) {
@@ -1353,12 +1839,8 @@ class _WaveformPainter extends CustomPainter {
       var maxPoint = source[start];
       for (var index = start + 1; index < end; index++) {
         final point = source[index];
-        if (point.value < minPoint.value) {
-          minPoint = point;
-        }
-        if (point.value > maxPoint.value) {
-          maxPoint = point;
-        }
+        if (point.value < minPoint.value) minPoint = point;
+        if (point.value > maxPoint.value) maxPoint = point;
       }
       _appendUnique(reduced, source[start]);
       if (minPoint.timestampMs <= maxPoint.timestampMs) {
@@ -1382,9 +1864,9 @@ class _WaveformPainter extends CustomPainter {
     target.add(point);
   }
 
-  void _drawLabel(Canvas canvas, Size size, {required String text, required Offset offset}) {
+  void _drawLabel(Canvas canvas, Size size, {required String text, required Offset offset, Color color = const Color(0xFF51606B)}) {
     final painter = TextPainter(
-      text: TextSpan(text: text, style: const TextStyle(fontSize: 10, color: Color(0xFF51606B))),
+      text: TextSpan(text: text, style: TextStyle(fontSize: 9, color: color)),
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: math.max(0, size.width - offset.dx));
     painter.paint(canvas, offset);
@@ -1409,30 +1891,18 @@ class _WaveformViewport {
   final double center;
   final double halfRange;
 
-  factory _WaveformViewport.fromBounds({
-    required double minValue,
-    required double maxValue,
-  }) {
-    if (minValue == 0 && maxValue == 0) {
-      return const _WaveformViewport(center: 0, halfRange: 1);
-    }
+  factory _WaveformViewport.fromBounds({required double minValue, required double maxValue}) {
+    if (minValue == 0 && maxValue == 0) return const _WaveformViewport(center: 0, halfRange: 1);
     final center = (minValue + maxValue) / 2;
     var halfRange = (maxValue - minValue) / 2;
-    if (halfRange.abs() < 0.0001) {
-      halfRange = 1;
-    }
+    if (halfRange.abs() < 0.0001) halfRange = 1;
     return _WaveformViewport(center: center, halfRange: halfRange * 1.1);
   }
 
-  factory _WaveformViewport.fromLabelBounds({
-    required double minLabel,
-    required double maxLabel,
-  }) {
+  factory _WaveformViewport.fromLabelBounds({required double minLabel, required double maxLabel}) {
     final center = (minLabel + maxLabel) / 2;
     var halfRange = (maxLabel - minLabel) / 2;
-    if (halfRange.abs() < 0.0001) {
-      halfRange = 1;
-    }
+    if (halfRange.abs() < 0.0001) halfRange = 1;
     return _WaveformViewport(center: center, halfRange: halfRange);
   }
 
@@ -1445,6 +1915,8 @@ class _WaveformViewport {
     return height / 2 - normalized * (height / 2);
   }
 }
+
+// ── Report card (enhanced) ─────────────────────────────────────────
 
 class _ReportCard extends StatelessWidget {
   const _ReportCard({required this.report});
@@ -1493,114 +1965,130 @@ class _ReportCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bool isRuleFallback = report.summary.contains('未启用大模型');
-    return Card(
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFD0D8D3).withValues(alpha: 0.5)),
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(18),
+        padding: const EdgeInsets.all(14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Row(
               children: <Widget>[
-                Expanded(
-                  child: Text('云端报告', style: Theme.of(context).textTheme.titleMedium),
-                ),
+                const Icon(Icons.description_outlined, size: 18, color: Color(0xFF457B9D)),
+                const SizedBox(width: 6),
+                Expanded(child: Text('云端分析报告', style: Theme.of(context).textTheme.titleMedium)),
                 if (report.riskLevel != null)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                     decoration: BoxDecoration(
                       color: _riskColor(report.riskLevel).withValues(alpha: 0.12),
-                      borderRadius: BorderRadius.circular(20),
-                      border: Border.all(color: _riskColor(report.riskLevel)),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: _riskColor(report.riskLevel).withValues(alpha: 0.4)),
                     ),
                     child: Text(
                       _riskLabel(report.riskLevel),
                       style: TextStyle(
                         color: _riskColor(report.riskLevel),
                         fontWeight: FontWeight.w600,
-                        fontSize: 12,
+                        fontSize: 11,
                       ),
                     ),
                   ),
               ],
             ),
-            const SizedBox(height: 6),
-            Text('会话 ${report.sessionId}', style: const TextStyle(fontSize: 12, color: Color(0xFF8D99AE))),
-            Text('生成时间 ${report.generatedAt}', style: const TextStyle(fontSize: 12, color: Color(0xFF8D99AE))),
-            if (report.confidence != null) ...<Widget>[
-              const SizedBox(height: 4),
-              Text(
-                '分析置信度 ${(report.confidence! * 100).toStringAsFixed(0)}%',
-                style: const TextStyle(fontSize: 12, color: Color(0xFF8D99AE)),
-              ),
-            ],
+            const SizedBox(height: 8),
+            Row(
+              children: <Widget>[
+                if (report.confidence != null)
+                  _MetricChip(label: '置信度', value: '${(report.confidence! * 100).toStringAsFixed(0)}%'),
+                const SizedBox(width: 6),
+                _MetricChip(label: '会话', value: report.sessionId.length > 8 ? '${report.sessionId.substring(0, 8)}...' : report.sessionId),
+              ],
+            ),
             if (isRuleFallback) ...<Widget>[
               const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFFFF3CD),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFFFFD166)),
+                  color: const Color(0xFFFFF8E0),
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                child: const Text(
-                  '未启用大模型，降级输出',
-                  style: TextStyle(fontSize: 12, color: Color(0xFF856404)),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(Icons.info_outline, size: 14, color: Colors.amber[700]),
+                    const SizedBox(width: 4),
+                    Text('规则分析模式（未启用大模型）', style: TextStyle(fontSize: 11, color: Colors.amber[800])),
+                  ],
                 ),
               ),
             ],
-            const SizedBox(height: 12),
-            Text(report.summary),
-            const SizedBox(height: 16),
-            Text('主要发现', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 8),
-            for (final ReportFinding finding in report.findings)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF8FAFC),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFDCE3EA)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Row(
-                        children: <Widget>[
-                          Container(
-                            width: 8,
-                            height: 8,
-                            margin: const EdgeInsets.only(right: 6, top: 1),
-                            decoration: BoxDecoration(
-                              color: _severityColor(finding.severity),
-                              shape: BoxShape.circle,
-                            ),
+            const SizedBox(height: 10),
+            Text('综合结论', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 4),
+            Text(report.summary, style: const TextStyle(fontSize: 12, height: 1.4)),
+            if (report.findings.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              Text('主要发现', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 6),
+              for (final ReportFinding finding in report.findings)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF5F8F6),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Container(
+                          width: 8,
+                          height: 8,
+                          margin: const EdgeInsets.only(top: 4, right: 6),
+                          decoration: BoxDecoration(
+                            color: _severityColor(finding.severity),
+                            shape: BoxShape.circle,
                           ),
-                          Expanded(child: Text(finding.title, style: const TextStyle(fontWeight: FontWeight.w500))),
-                          Text(
-                            finding.severity,
-                            style: TextStyle(fontSize: 11, color: _severityColor(finding.severity)),
+                        ),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: <Widget>[
+                              Text(finding.title, style: const TextStyle(fontWeight: FontWeight.w500, fontSize: 12)),
+                              const SizedBox(height: 2),
+                              Text(finding.detail, style: const TextStyle(fontSize: 11, color: Color(0xFF6B7C72))),
+                            ],
                           ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Text(finding.detail, style: const TextStyle(fontSize: 13)),
-                    ],
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            Text('建议', style: Theme.of(context).textTheme.titleSmall),
+            ],
+            if (report.recommendations.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              Text('建议', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 4),
+              for (final String item in report.recommendations)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 3),
+                  child: Text('· $item', style: const TextStyle(fontSize: 12, height: 1.3)),
+                ),
+            ],
             const SizedBox(height: 8),
-            for (final String item in report.recommendations)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 6),
-                child: Text('• $item'),
-              ),
+            Text(
+              '辅助预警，不构成医疗诊断',
+              style: TextStyle(fontSize: 10, fontStyle: FontStyle.italic, color: Colors.grey[500]),
+            ),
           ],
         ),
       ),
     );
   }
 }
-

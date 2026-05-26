@@ -92,6 +92,11 @@ class MonitorController extends ChangeNotifier {
   int failedSegmentUploadCount = 0;
   SegmentRecord? latestSegment;
 
+  final MonitoringAgentStatus agentStatus = MonitoringAgentStatus();
+  String? _agentLastAnalyzedSegmentId;
+  Timer? _agentCheckTimer;
+  bool _agentAutoAnalyzeEnabled = true;
+
   List<String> get events => List<String>.unmodifiable(_events);
   List<ChannelDescriptor> get channelCatalog =>
       List<ChannelDescriptor>.unmodifiable(_channelCatalog);
@@ -259,6 +264,7 @@ class MonitorController extends ChangeNotifier {
     if (autoSegmentUploadEnabled) {
       await _openCloudSessionForAutoUpload();
     }
+    _startAgentCheck();
     await adapter.connect();
   }
 
@@ -267,6 +273,7 @@ class MonitorController extends ChangeNotifier {
     historyOffsetSeconds = 0;
     _pauseReferenceTimestampMs = null;
     _pausedSnapshots = <String, WaveformBufferSnapshot>{};
+    _stopAgentCheck();
     await _currentAdapter?.disconnect();
     await _segmentUploader.flush();
     _scheduleNotify();
@@ -1077,10 +1084,134 @@ class MonitorController extends ChangeNotifier {
     return liveBase - (liveDisplayLagSeconds * 1000).round();
   }
 
+  void _startAgentCheck() {
+    _stopAgentCheck();
+    agentStatus.state = AgentState.idle;
+    agentStatus.riskLevel = null;
+    agentStatus.confidence = null;
+    agentStatus.summary = '';
+    agentStatus.notificationText = '';
+    agentStatus.lastAlertRiskLevel = null;
+    agentStatus.isAlertAcknowledged = false;
+    _agentLastAnalyzedSegmentId = null;
+    _agentCheckTimer = Timer.periodic(
+      MonitoringAgentStatus.agentCheckInterval,
+      (_) => _agentAutoAnalyze(),
+    );
+    _pushEvent('长期监测 Agent 已启动');
+    _scheduleNotify();
+  }
+
+  void _stopAgentCheck() {
+    _agentCheckTimer?.cancel();
+    _agentCheckTimer = null;
+    agentStatus.state = AgentState.idle;
+    _scheduleNotify();
+  }
+
+  Future<void> _agentAutoAnalyze() async {
+    if (!_agentAutoAnalyzeEnabled) return;
+    final segment = latestSegment;
+    final localSession = session;
+    if (segment == null || localSession == null) {
+      if (agentStatus.state != AgentState.idle) {
+        agentStatus.state = AgentState.idle;
+        agentStatus.summary = '等待数据上传';
+        _scheduleNotify();
+      }
+      return;
+    }
+    if (segment.id == _agentLastAnalyzedSegmentId) return;
+
+    _agentLastAnalyzedSegmentId = segment.id;
+    agentStatus.state = AgentState.analyzing;
+    agentStatus.summary = '正在分析分段 #${segment.segmentIndex}...';
+    _pushEvent('Agent 自动分析分段 #${segment.segmentIndex}');
+    _scheduleNotify();
+
+    try {
+      cloudApi.baseUrl = cloudBaseUrl;
+      final agentReport = await cloudApi.analyzeSegment(
+        sessionId: localSession.id,
+        segmentId: segment.id,
+      );
+      report = agentReport;
+      agentStatus.lastAnalysisTime = DateTime.now();
+      agentStatus.riskLevel = agentReport.riskLevel;
+      agentStatus.confidence = agentReport.confidence;
+      agentStatus.summary = agentReport.summary;
+      agentStatus.error = '';
+
+      final isRuleFallback = agentReport.summary.contains('未启用大模型');
+
+      switch (agentReport.riskLevel) {
+        case 'high':
+          agentStatus.state = AgentState.highRisk;
+          agentStatus.notificationText = _buildNotificationText(agentReport);
+          if (agentStatus.shouldShowAlert()) {
+            agentStatus.markAlertShown();
+            _pushEvent('Agent 高风险预警：${agentReport.summary}');
+          }
+          break;
+        case 'medium':
+          agentStatus.state = AgentState.warning;
+          agentStatus.notificationText = isRuleFallback ? '' : _buildNotificationText(agentReport);
+          break;
+        default:
+          agentStatus.state = AgentState.normal;
+          agentStatus.notificationText = '';
+      }
+    } catch (error) {
+      agentStatus.state = AgentState.error;
+      agentStatus.error = error.toString();
+      agentStatus.summary = '分析失败';
+      _pushEvent('Agent 自动分析失败: $error');
+    }
+    _scheduleNotify();
+  }
+
+  String _buildNotificationText(MedicalReport r) {
+    final buffer = StringBuffer();
+    buffer.writeln('【心肺监测辅助预警通知】');
+    buffer.writeln();
+    buffer.writeln('风险等级：${r.riskLevel == 'high' ? '高风险' : r.riskLevel == 'medium' ? '中风险' : '低风险'}');
+    if (r.confidence != null) {
+      buffer.writeln('置信度：${(r.confidence! * 100).toStringAsFixed(0)}%');
+    }
+    buffer.writeln();
+    buffer.writeln('综合结论：${r.summary}');
+    if (r.findings.isNotEmpty) {
+      buffer.writeln();
+      buffer.writeln('主要发现：');
+      for (final f in r.findings.take(3)) {
+        buffer.writeln('· ${f.title}：${f.detail}');
+      }
+    }
+    buffer.writeln();
+    buffer.writeln('此为辅助预警，不构成医疗诊断。建议及时联系本人/就医/呼叫急救。');
+    return buffer.toString();
+  }
+
+  void acknowledgeAgentAlert() {
+    agentStatus.acknowledgeAlert();
+    _scheduleNotify();
+  }
+
+  void toggleAgentAutoAnalyze(bool enabled) {
+    _agentAutoAnalyzeEnabled = enabled;
+    if (!enabled) {
+      _stopAgentCheck();
+    } else if (isConnected) {
+      _startAgentCheck();
+    }
+    _scheduleNotify();
+  }
+
   @override
   void dispose() {
     _notifyTimer?.cancel();
     _uiTickTimer?.cancel();
+    _agentCheckTimer?.cancel();
     _frameSubscription?.cancel();
     _statusSubscription?.cancel();
     _catalogSubscription?.cancel();
