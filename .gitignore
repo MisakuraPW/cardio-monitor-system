@@ -1,1 +1,36 @@
-FlutterSDK/
+# IDE
+.vscode/
+.idea/
+.vs/
+
+# Flutter / Dart
+.dart_tool/
+build/
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+env/
+
+# Secrets
+.env
+
+# Build artifacts
+*.tsbuildinfo
+dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code internals
+.claude/worktrees/
+
+# Docs (will be replaced later)
+docs/
