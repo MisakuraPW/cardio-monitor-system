@@ -36,7 +36,7 @@ constexpr bool kDemoPublishRawWaveforms = !kDemoWifiMode;
 constexpr bool kDemoPublishFilteredWaveforms = true;
 bool g_enableEcg = true;
 bool g_enablePpg = true;
-bool g_enableImu = false;
+bool g_enableImu = true;
 bool g_enableTemp = true;
 
 uint32_t g_dropEcg = 0;
@@ -61,6 +61,7 @@ constexpr uint32_t kTempMqttQueueLen = 16;
 
 constexpr size_t kEcgBatchMax = 40;
 constexpr size_t kPpgBatchMax = 20;
+constexpr size_t kImuBatchMax = 4;
 constexpr size_t kTempBatchMax = 4;
 constexpr TickType_t kMqttTaskPeriodTicks = pdMS_TO_TICKS(20);
 constexpr uint8_t kPublishBurstsPerLoop = 1;
@@ -342,7 +343,9 @@ void handleControlPayload(const char* payload) {
                   textContains(payload, "\"imu_ax\"") ||
                   textContains(payload, "\"imu_ay\"") ||
                   textContains(payload, "\"imu_az\"") ||
-                  textContains(payload, "\"imu_gx\"");
+                  textContains(payload, "\"imu_gx\"") ||
+                  textContains(payload, "\"imu_gy\"") ||
+                  textContains(payload, "\"imu_gz\"");
     g_enableTemp = textContains(payload, "\"temp\"") ||
                    textContains(payload, "\"temperature\"");
     data_logger::logStatus("[NET] MQTT control set_channels.");

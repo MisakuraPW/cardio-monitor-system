@@ -12,6 +12,16 @@ import 'package:uuid/uuid.dart';
 
 import 'models.dart';
 
+const List<String> _statusTelemetryChannelKeys = <String>[
+  'imu_ax',
+  'imu_ay',
+  'imu_az',
+  'imu_gx',
+  'imu_gy',
+  'imu_gz',
+  'temp',
+];
+
 abstract class DataSourceAdapter {
   Stream<SignalFrame> get streamFrames;
   Stream<AdapterStatus> get streamStatus;
@@ -846,10 +856,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
               'ecg_filtered',
               'ppg_ir_filtered',
               'ppg_red_filtered',
-              'imu_ax',
-              'imu_ay',
-              'imu_az',
-              'temp',
+              ..._statusTelemetryChannelKeys,
             ],
           },
         ),
@@ -874,10 +881,13 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
         .map((ChannelDescriptor item) => item.key)
         .where((String key) => !config.demoMode || _isDemoRealtimeChannel(key))
         .toList();
+    if (config.demoMode) {
+      enabledKeys.addAll(_statusTelemetryChannelKeys);
+    }
     await sendControl(
       ControlCommand(
         type: 'set_channels',
-        payload: <String, dynamic>{'enabledKeys': enabledKeys},
+        payload: <String, dynamic>{'enabledKeys': enabledKeys.toSet().toList()},
       ),
     );
   }
@@ -2379,14 +2389,16 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   @override
   Future<void> updateChannels(List<ChannelDescriptor> channels) async {
     _currentCatalog = List<ChannelDescriptor>.from(channels);
+    final enabledKeys = channels
+        .where((ChannelDescriptor item) => item.enabled)
+        .map((ChannelDescriptor item) => item.key)
+        .toSet();
+    enabledKeys.addAll(_statusTelemetryChannelKeys);
     await sendControl(
       ControlCommand(
         type: 'set_channels',
         payload: <String, dynamic>{
-          'enabledKeys': channels
-              .where((ChannelDescriptor item) => item.enabled)
-              .map((ChannelDescriptor item) => item.key)
-              .toList(),
+          'enabledKeys': enabledKeys.toList(),
         },
       ),
     );

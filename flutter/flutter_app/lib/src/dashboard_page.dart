@@ -346,7 +346,7 @@ class _DashboardPageState extends State<DashboardPage> {
               color: const Color(0xFFF4A261),
               title: '开机缓冲',
               value: '${(_controller.startupBufferProgress * 100).toStringAsFixed(0)}%',
-              detail: '正在缓存稳定显示窗口',
+              detail: '正在建立 30 秒延迟播放',
             ),
           _InfoCard(
             icon: _controller.isEcgWorn ? Icons.check_circle : Icons.error_outline,

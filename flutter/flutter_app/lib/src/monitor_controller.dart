@@ -90,7 +90,7 @@ class MonitorController extends ChangeNotifier {
   double historyOffsetSeconds = 0;
   double gain = 1;
   double liveDisplayLagSeconds = 2;
-  double startupBufferSeconds = 15;
+  double startupBufferSeconds = 30;
 
   String cloudBaseUrl = 'http://182.254.220.56:8000';
   String userName = '演示用户';
@@ -542,8 +542,9 @@ class MonitorController extends ChangeNotifier {
       _observeTemperatureFrame(frame);
     }
     if (_isEcgChannel(frame.channelKey)) {
-      _latestEcgLeadOn = frame.quality > 0.15;
-      if (!isEcgWorn) {
+      final leadOn = frame.transport.startsWith('ble_') || frame.quality > 0.15;
+      _latestEcgLeadOn = leadOn;
+      if (!leadOn) {
         _buffers.remove(frame.channelKey);
         _markFrameDirty();
         return;
@@ -895,10 +896,10 @@ class MonitorController extends ChangeNotifier {
   }
 
   double _effectiveLiveDisplayLagSeconds(WaveformHistoryStore store) {
-    final durationSeconds =
-        (store.latestPointTimestampMs - store.oldestTimestampMs) / 1000.0;
-    final bufferedLag = math.max(0.0, durationSeconds - secondsPerScreen);
-    return math.max(liveDisplayLagSeconds, math.min(startupBufferSeconds, bufferedLag));
+    if (mode == DataSourceMode.file || isPaused) {
+      return liveDisplayLagSeconds;
+    }
+    return math.max(liveDisplayLagSeconds, startupBufferSeconds);
   }
 
   double _liveVisibleBufferDurationSeconds() {

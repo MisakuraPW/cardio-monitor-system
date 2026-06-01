@@ -18,6 +18,7 @@ NimBLECharacteristic* g_notifyChar = nullptr;
 NimBLECharacteristic* g_controlChar = nullptr;
 QueueHandle_t g_ecgBleQueue = nullptr;
 QueueHandle_t g_ppgBleQueue = nullptr;
+QueueHandle_t g_imuBleQueue = nullptr;
 QueueHandle_t g_tempBleQueue = nullptr;
 
 bool g_connected = false;
@@ -27,6 +28,7 @@ bool g_initialized = false;
 bool g_advertising = false;
 bool g_enableEcg = true;
 bool g_enablePpg = true;
+bool g_enableImu = true;
 bool g_enableTemp = true;
 uint16_t g_mtu = 23;
 size_t g_notifyPayloadMax = BLE_NOTIFY_PAYLOAD_FALLBACK;
@@ -34,19 +36,24 @@ size_t g_notifyPayloadMax = BLE_NOTIFY_PAYLOAD_FALLBACK;
 uint32_t g_bleAggregateSeq = 0;
 uint32_t g_bleEcgSeq = 0;
 uint32_t g_blePpgSeq = 0;
+uint32_t g_bleImuSeq = 0;
 uint32_t g_bleTempSeq = 0;
 uint32_t g_dropEcg = 0;
 uint32_t g_dropPpg = 0;
+uint32_t g_dropImu = 0;
 uint32_t g_dropTemp = 0;
 uint32_t g_overwriteEcg = 0;
 uint32_t g_overwritePpg = 0;
+uint32_t g_overwriteImu = 0;
 uint32_t g_overwriteTemp = 0;
 uint32_t g_notifyFail = 0;
+uint32_t g_imuDecimateCounter = 0;
 
 constexpr size_t kBlePayloadBuffer = 512;
 constexpr size_t kBio3HeaderLen = 20;
 constexpr size_t kEcgBatchMax = 10;
 constexpr size_t kPpgBatchMax = 4;
+constexpr size_t kImuBatchMax = 2;
 constexpr size_t kTempBatchMax = 4;
 constexpr TickType_t kBleTaskPeriodTicks = pdMS_TO_TICKS(20);
 constexpr uint8_t kNotifyMaxRetries = 3;
@@ -181,11 +188,14 @@ bool extractBoolValue(const char* text, const char* key, bool* out) {
 void resetCounters() {
   g_dropEcg = 0;
   g_dropPpg = 0;
+  g_dropImu = 0;
   g_dropTemp = 0;
   g_overwriteEcg = 0;
   g_overwritePpg = 0;
+  g_overwriteImu = 0;
   g_overwriteTemp = 0;
   g_notifyFail = 0;
+  g_imuDecimateCounter = 0;
 }
 
 void handleControlPayload(const char* payload) {
@@ -202,6 +212,13 @@ void handleControlPayload(const char* payload) {
     g_enablePpg = textContains(payload, "\"ppg\"") ||
                   textContains(payload, "\"ppg_ir\"") ||
                   textContains(payload, "\"ppg_red\"");
+    g_enableImu = textContains(payload, "\"imu\"") ||
+                  textContains(payload, "\"imu_ax\"") ||
+                  textContains(payload, "\"imu_ay\"") ||
+                  textContains(payload, "\"imu_az\"") ||
+                  textContains(payload, "\"imu_gx\"") ||
+                  textContains(payload, "\"imu_gy\"") ||
+                  textContains(payload, "\"imu_gz\"");
     g_enableTemp = textContains(payload, "\"temp\"") ||
                    textContains(payload, "\"temperature\"");
     data_logger::logStatus("[BLE] control set_channels.");
@@ -486,6 +503,49 @@ void publishPpgSamples() {
   (void)sendNotifyPayload(payload, off);
 }
 
+void publishImuSamples() {
+  if (!g_enableImu || g_imuBleQueue == nullptr) {
+    return;
+  }
+
+  ImuSample batch[kImuBatchMax];
+  const size_t batchMax = maxSamplesForNotify(20U, kImuBatchMax);
+  const size_t n = dequeueBatch(g_imuBleQueue, batch, batchMax);
+  if (n == 0) {
+    return;
+  }
+
+  const uint32_t seq = g_bleImuSeq++;
+
+  uint8_t payload[kBlePayloadBuffer] = {};
+  const uint16_t payloadLen = static_cast<uint16_t>(n * 20U);
+  const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'I', seq, static_cast<uint16_t>(n), payloadLen);
+  size_t off = payloadOffset;
+
+  for (size_t i = 0; i < n; ++i) {
+    if (off + 20 > sizeof(payload)) {
+      break;
+    }
+    appendU64Le(&payload[off], batch[i].ts_us);
+    off += 8;
+    appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].acc_x));
+    off += 2;
+    appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].acc_y));
+    off += 2;
+    appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].acc_z));
+    off += 2;
+    appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_x));
+    off += 2;
+    appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_y));
+    off += 2;
+    appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_z));
+    off += 2;
+  }
+  finishBio2Frame(payload, payloadOffset, off - payloadOffset);
+
+  (void)sendNotifyPayload(payload, off);
+}
+
 void publishAggregateSamples() {
   if (!g_enableEcg || !g_enablePpg || g_ecgBleQueue == nullptr || g_ppgBleQueue == nullptr) {
     publishEcgSamples();
@@ -609,6 +669,9 @@ void begin() {
   if (g_ppgBleQueue == nullptr) {
     g_ppgBleQueue = xQueueCreate(BLE_PPG_QUEUE_LEN, sizeof(PpgSample));
   }
+  if (g_imuBleQueue == nullptr) {
+    g_imuBleQueue = xQueueCreate(BLE_IMU_QUEUE_LEN, sizeof(ImuSample));
+  }
   if (g_tempBleQueue == nullptr) {
     g_tempBleQueue = xQueueCreate(BLE_TEMP_QUEUE_LEN, sizeof(TemperatureSample));
   }
@@ -638,6 +701,9 @@ void setActive(const bool active) {
     }
     if (g_ppgBleQueue != nullptr) {
       xQueueReset(g_ppgBleQueue);
+    }
+    if (g_imuBleQueue != nullptr) {
+      xQueueReset(g_imuBleQueue);
     }
     if (g_tempBleQueue != nullptr) {
       xQueueReset(g_tempBleQueue);
@@ -683,11 +749,25 @@ bool enqueuePpg(const PpgSample& sample) {
 }
 
 bool enqueueImu(const ImuSample& sample) {
-  (void)sample;
   if (!g_active) {
     return true;
   }
-  return true;
+  ++g_imuDecimateCounter;
+  if ((g_imuDecimateCounter % 20U) != 0U) {
+    return true;
+  }
+  if (g_imuBleQueue == nullptr) {
+    return false;
+  }
+  bool overwrote = false;
+  if (enqueueDroppingOldest(g_imuBleQueue, sample, &overwrote)) {
+    if (overwrote) {
+      ++g_overwriteImu;
+    }
+    return true;
+  }
+  ++g_dropImu;
+  return false;
 }
 
 bool enqueueTemperature(const TemperatureSample& sample) {
@@ -726,6 +806,7 @@ void taskLoop() {
         vTaskDelay(pdMS_TO_TICKS(2));
       }
       publishTemperatureSamples();
+      publishImuSamples();
     }
 
     vTaskDelayUntil(&lastWake, kBleTaskPeriodTicks);
