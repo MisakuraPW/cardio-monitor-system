@@ -61,6 +61,7 @@ constexpr uint32_t kTempMqttQueueLen = 16;
 
 constexpr size_t kEcgBatchMax = 40;
 constexpr size_t kPpgBatchMax = 20;
+constexpr size_t kImuBatchMax = 20;
 constexpr size_t kTempBatchMax = 4;
 constexpr TickType_t kMqttTaskPeriodTicks = pdMS_TO_TICKS(20);
 constexpr uint8_t kPublishBurstsPerLoop = 1;
