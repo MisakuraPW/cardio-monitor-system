@@ -68,8 +68,7 @@ constexpr uint32_t DEBUG_BAUDRATE = 921600;
 constexpr uint32_t BLE_TASK_STACK = 6144;
 constexpr UBaseType_t BLE_TASK_PRIORITY = 3;
 constexpr uint32_t BLE_ECG_QUEUE_LEN = 2048;
-constexpr uint32_t BLE_PPG_QUEUE_LEN = 512;
-constexpr uint32_t BLE_IMU_QUEUE_LEN = 512;
+constexpr uint32_t BLE_PPG_QUEUE_LEN = 1024;
 constexpr uint32_t BLE_TEMP_QUEUE_LEN = 16;
 constexpr uint16_t BLE_MTU_TARGET = 512;
 constexpr uint16_t BLE_NOTIFY_PAYLOAD_FALLBACK = 20;
@@ -104,7 +103,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_IMU_OUTPUT
-#define ENABLE_IMU_OUTPUT 1
+#define ENABLE_IMU_OUTPUT 0
 #endif
 
 #ifndef ENABLE_TEMP_OUTPUT
