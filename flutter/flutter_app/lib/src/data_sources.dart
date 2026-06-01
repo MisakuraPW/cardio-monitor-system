@@ -335,7 +335,7 @@ class _Bio1BinaryCodec {
       irValues.add(data.getUint32(offset + 8, Endian.little).toDouble());
       redValues.add(data.getUint32(offset + 12, Endian.little).toDouble());
     }
-    final sampleRate = _estimateSampleRate(timestampsUs, 100);
+    final sampleRate = _estimateSampleRate(timestampsUs, 200);
     channels[irKey] = _channel(
       key: irKey,
       label: irLabel,
@@ -570,6 +570,8 @@ class _Bio1BinaryCodec {
         return 16;
       case 'I':
         return 20;
+      case 'T':
+        return 15;
       default:
         return null;
     }
@@ -1823,7 +1825,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       redValues.add(data.getUint32(offset + 12, Endian.little).toDouble());
     }
 
-    final sampleRate = _estimateSampleRate(timestampsUs, 100);
+    final sampleRate = _estimateSampleRate(timestampsUs, 200);
     _mergeCatalog(<ChannelDescriptor>[
       _buildChannelDescriptor(
         key: 'ppg_ir',
@@ -2027,11 +2029,15 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   int? _sampleSizeForType(int typeByte) {
     switch (String.fromCharCode(typeByte)) {
       case 'E':
+      case 'F':
         return 12;
       case 'P':
+      case 'Q':
         return 16;
       case 'I':
         return 20;
+      case 'T':
+        return 15;
       default:
         return null;
     }

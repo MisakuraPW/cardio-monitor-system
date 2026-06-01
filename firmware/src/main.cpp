@@ -56,6 +56,7 @@ constexpr size_t kPacketizerTempBatch = 4;
 constexpr bool kEnableUartStream = (ENABLE_UART_OUTPUT == 1);
 constexpr bool kEnableWifiOutput = (ENABLE_WIFI_OUTPUT == 1);
 constexpr bool kEnableBleOutput = (ENABLE_BLE_OUTPUT == 1);
+constexpr bool kEnableImuOutput = (ENABLE_IMU_OUTPUT == 1);
 
 uint32_t g_ecgDropCount = 0;
 bool g_useWifiOutput = false;
@@ -220,6 +221,9 @@ void emitPpg(const PpgSample& s) {
 
 void emitImu(const ImuSample& s) {
   signal_dsp::updateImu(s);
+  if (!kEnableImuOutput) {
+    return;
+  }
   if (g_useWifiOutput) {
     (void)cloud_mqtt::enqueueImu(s);
   }
@@ -443,14 +447,16 @@ void packetizerTask(void* /*pvParameters*/) {
       ++processed;
     }
 
-    ImuSample imu{};
-    for (size_t i = 0; i < kPacketizerImuBatch; ++i) {
-      if (xQueueReceive(g_imuQueue, &imu, 0) != pdPASS) {
-        break;
+    if (g_imuQueue != nullptr) {
+      ImuSample imu{};
+      for (size_t i = 0; i < kPacketizerImuBatch; ++i) {
+        if (xQueueReceive(g_imuQueue, &imu, 0) != pdPASS) {
+          break;
+        }
+        emitImu(imu);
+        didWork = true;
+        ++processed;
       }
-      emitImu(imu);
-      didWork = true;
-      ++processed;
     }
 
     TemperatureSample temp{};

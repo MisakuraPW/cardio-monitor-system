@@ -295,8 +295,39 @@ def _decode_bio(payload: bytes) -> _BinaryBatch:
         frame = memoryview(payload)[magic_index : magic_index + frame_length]
         if type_code == 'E':
             _decode_ecg(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
+        elif type_code == 'F':
+            _decode_ecg(
+                frame,
+                seq,
+                sample_count,
+                sample_size,
+                channels,
+                frames,
+                header_len,
+                2 if is_bio2 else 1,
+                decode_status,
+                channel_key='ecg_filtered',
+                label='ECG Filtered',
+                color_hex='#D94F70',
+            )
         elif type_code == 'P':
             _decode_ppg(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
+        elif type_code == 'Q':
+            _decode_ppg(
+                frame,
+                seq,
+                sample_count,
+                sample_size,
+                channels,
+                frames,
+                header_len,
+                2 if is_bio2 else 1,
+                decode_status,
+                ir_key='ppg_ir_filtered',
+                red_key='ppg_red_filtered',
+                ir_label='PPG IR Filtered',
+                red_label='PPG RED Filtered',
+            )
         elif type_code == 'I':
             _decode_imu(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
 
@@ -315,6 +346,9 @@ def _decode_ecg(
     payload_offset: int,
     frame_version: int,
     decode_status: str,
+    channel_key: str = 'ecg',
+    label: str = 'ECG',
+    color_hex: str = '#F25F5C',
 ) -> None:
     timestamps_us: list[int] = []
     samples: list[float] = []
@@ -324,8 +358,8 @@ def _decode_ecg(
         samples.append(float(struct.unpack_from('<H', frame, offset + 8)[0]))
 
     sample_rate = _estimate_sample_rate(timestamps_us, 500)
-    channels['ecg'] = _channel('ecg', 'ECG', 'adc', sample_rate, '#F25F5C')
-    frames.append(_frame('ecg', 'adc', sample_rate, timestamps_us, samples, seq, frame_version, decode_status))
+    channels[channel_key] = _channel(channel_key, label, 'adc', sample_rate, color_hex)
+    frames.append(_frame(channel_key, 'adc', sample_rate, timestamps_us, samples, seq, frame_version, decode_status))
 
 
 def _decode_ppg(
@@ -338,6 +372,10 @@ def _decode_ppg(
     payload_offset: int,
     frame_version: int,
     decode_status: str,
+    ir_key: str = 'ppg_ir',
+    red_key: str = 'ppg_red',
+    ir_label: str = 'PPG IR',
+    red_label: str = 'PPG RED',
 ) -> None:
     timestamps_us: list[int] = []
     ir_samples: list[float] = []
@@ -348,11 +386,11 @@ def _decode_ppg(
         ir_samples.append(float(struct.unpack_from('<I', frame, offset + 8)[0]))
         red_samples.append(float(struct.unpack_from('<I', frame, offset + 12)[0]))
 
-    sample_rate = _estimate_sample_rate(timestamps_us, 100)
-    channels['ppg_ir'] = _channel('ppg_ir', 'PPG IR', 'count', sample_rate, '#247BA0')
-    channels['ppg_red'] = _channel('ppg_red', 'PPG RED', 'count', sample_rate, '#C84C5A')
-    frames.append(_frame('ppg_ir', 'count', sample_rate, timestamps_us, ir_samples, seq, frame_version, decode_status))
-    frames.append(_frame('ppg_red', 'count', sample_rate, timestamps_us, red_samples, seq, frame_version, decode_status))
+    sample_rate = _estimate_sample_rate(timestamps_us, 200)
+    channels[ir_key] = _channel(ir_key, ir_label, 'count', sample_rate, '#247BA0')
+    channels[red_key] = _channel(red_key, red_label, 'count', sample_rate, '#C84C5A')
+    frames.append(_frame(ir_key, 'count', sample_rate, timestamps_us, ir_samples, seq, frame_version, decode_status))
+    frames.append(_frame(red_key, 'count', sample_rate, timestamps_us, red_samples, seq, frame_version, decode_status))
 
 
 def _decode_imu(
@@ -444,9 +482,9 @@ def _looks_like_bio(payload: bytes) -> bool:
 
 
 def _sample_size_for_type(type_code: str) -> int | None:
-    if type_code == 'E':
+    if type_code in {'E', 'F'}:
         return 12
-    if type_code == 'P':
+    if type_code in {'P', 'Q'}:
         return 16
     if type_code == 'I':
         return 20
