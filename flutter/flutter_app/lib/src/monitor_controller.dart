@@ -119,10 +119,14 @@ class MonitorController extends ChangeNotifier {
       isConnected &&
       !isPaused &&
       mode != DataSourceMode.file &&
-      _liveVisibleBufferDurationSeconds() < startupBufferSeconds;
-  double get startupBufferProgress => startupBufferSeconds <= 0
+      _liveVisibleBufferDurationSeconds() < _requiredLiveBufferSeconds;
+  double get startupBufferProgress => _requiredLiveBufferSeconds <= 0
       ? 1
-      : (_liveVisibleBufferDurationSeconds() / startupBufferSeconds).clamp(0.0, 1.0);
+      : (_liveVisibleBufferDurationSeconds() / _requiredLiveBufferSeconds).clamp(0.0, 1.0);
+  double get _requiredLiveBufferSeconds =>
+      math.max(0, startupBufferSeconds) + math.max(0, secondsPerScreen);
+  int get _liveRetentionMs =>
+      (math.max(30.0, _requiredLiveBufferSeconds + 10.0) * 1000).round();
   bool get isEcgWorn => _latestEcgLeadOn ?? true;
   double get displayTemperatureCelsius =>
       _latestTemperatureCelsius ?? localAnalysis.physio.temperatureCelsius ?? 36.7;
@@ -616,7 +620,7 @@ class MonitorController extends ChangeNotifier {
     latestSegment = segment;
     uploadedSegmentCount += 1;
     pendingSegmentUploadCount = _segmentUploader.pendingCount;
-    _trimBuffersBefore(segment.endTimestampMs - 30000);
+    _trimBuffersBefore(segment.endTimestampMs - _liveRetentionMs);
     _pushEvent('自动上传分段 #${segment.segmentIndex} 完成，样本 ${segment.sampleCount}');
     _scheduleNotify();
   }
@@ -780,6 +784,9 @@ class MonitorController extends ChangeNotifier {
     if (frame.samples.isEmpty) {
       return null;
     }
+    if (mode == DataSourceMode.file) {
+      return frame;
+    }
 
     final previousDisplayTimestamp = _lastDisplayTimestampMsByChannel[frame.channelKey];
     final lastSeq = _lastAcceptedSeqByChannel[frame.channelKey];
@@ -794,11 +801,12 @@ class MonitorController extends ChangeNotifier {
     final displayRate = _nominalDisplaySampleRate(frame.channelKey, frame.sampleRate);
     final stepMs = math.max(1, (1000 / displayRate).round());
     final incomingTimestamps = frame.sampleTimestampsMs;
-    final trustIncoming = _canTrustFrameTimestamps(
+    final timestampsLookSane = _canTrustFrameTimestamps(
       frame: frame,
       nominalRate: displayRate,
       previousTimestampMs: previousDisplayTimestamp,
     );
+    final trustIncoming = mode == DataSourceMode.file && timestampsLookSane;
 
     final normalizedTimestamps = <int>[];
     if (trustIncoming && incomingTimestamps != null) {
