@@ -77,6 +77,7 @@ class MonitorController extends ChangeNotifier {
   MedicalReport? report;
 
   int latestTimestampMs = 0;
+  int _displayAnchorMs = 0; // smoothed anchor — never jumps more than 250 ms / tick
   int? _pauseReferenceTimestampMs;
   bool isPaused = false;
   double secondsPerScreen = 6;
@@ -234,6 +235,7 @@ class MonitorController extends ChangeNotifier {
     uploadTask = null;
     analysisJob = null;
     latestTimestampMs = 0;
+    _displayAnchorMs = 0;
     isPaused = false;
     historyOffsetSeconds = 0;
     _pauseReferenceTimestampMs = null;
@@ -496,21 +498,6 @@ class MonitorController extends ChangeNotifier {
       return;
     }
     final frameLatestTimestampMs = _latestFrameTimestampMs(frame);
-
-    // Detect ESP32 reboot: timestamps from esp_timer_get_time() reset to near 0
-    // after the device restarts. A drop > 60 s (relative) is treated as a reboot.
-    const timestampResetThresholdMs = 60000;
-    if (latestTimestampMs > 0 &&
-        frameLatestTimestampMs < latestTimestampMs - timestampResetThresholdMs) {
-      // Purge all buffers so stale high-timestamp data doesn't pin the viewport
-      // in the future while new (post-reboot) data has low timestamps.
-      _buffers.clear();
-      _runtimeStats.clear();
-      latestTimestampMs = 0; // reset anchor so the next line re-baselines on new data
-      _pushEvent('检测到设备时间戳回跳（疑似重启），已重置波形缓存');
-      _scheduleNotify();
-    }
-
     latestTimestampMs = latestTimestampMs == 0
         ? frameLatestTimestampMs
         : math.max(latestTimestampMs, frameLatestTimestampMs);
@@ -1096,7 +1083,35 @@ class MonitorController extends ChangeNotifier {
     final liveBase = latestTimestampMs == 0
         ? DateTime.now().millisecondsSinceEpoch
         : latestTimestampMs;
-    return liveBase - (liveDisplayLagSeconds * 1000).round();
+    final target = liveBase - (liveDisplayLagSeconds * 1000).round();
+
+    if (_displayAnchorMs == 0) {
+      _displayAnchorMs = target;
+      return target;
+    }
+
+    // MQTT delivers frames in bursts.  The first frame of a burst may carry
+    // a timestamp seconds ahead of the bulk of the data (out-of-order
+    // delivery on QoS 0).  If we let the anchor jump to that spike instantly
+    // the viewport leaps past the buffered samples that follow — those
+    // samples then fall below the visible window, the waveform freezes, and
+    // the user sees the dreaded "scan-mode" sweep when the gap eventually
+    // fills in.
+    //
+    // Cap the per‑tick advance to 250 ms.  With the 50‑ms UI timer this
+    // still lets the display catch up at 5× real‑time, so live scrolling
+    // (which needs only ~50 ms / tick) is unaffected.
+    const maxAdvancePerTick = 250;
+    if (target > _displayAnchorMs + maxAdvancePerTick) {
+      _displayAnchorMs += maxAdvancePerTick;
+    } else if (target < _displayAnchorMs) {
+      // Anchor went backwards (pause, history, device reboot) — follow
+      // immediately so the user sees the correct position.
+      _displayAnchorMs = target;
+    } else {
+      _displayAnchorMs = target;
+    }
+    return _displayAnchorMs;
   }
 
   void _startAgentCheck() {
@@ -1150,7 +1165,6 @@ class MonitorController extends ChangeNotifier {
         sessionId: localSession.id,
         segmentId: segment.id,
       );
-      report = agentReport;
       agentStatus.lastAnalysisTime = DateTime.now();
       agentStatus.riskLevel = agentReport.riskLevel;
       agentStatus.confidence = agentReport.confidence;
@@ -1163,6 +1177,12 @@ class MonitorController extends ChangeNotifier {
         case 'high':
           agentStatus.state = AgentState.highRisk;
           agentStatus.notificationText = _buildNotificationText(agentReport);
+          // Only auto-publish a visible report when the risk is high.
+          // For medium / low / normal results the agent updates its
+          // internal status but does not surface a report card — the
+          // user can still manually trigger "upload + analyze" for a
+          // full report at any time.
+          report = agentReport;
           if (agentStatus.shouldShowAlert()) {
             agentStatus.markAlertShown();
             _pushEvent('Agent 高风险预警：${agentReport.summary}');
@@ -1666,34 +1686,48 @@ WaveformSlice _buildWaveformSlice(
     );
   }
 
-  // ★ Fixed: strict uniform-step downsampling that guarantees output ≤ maxVisiblePoints.
-  // The old min/max-envelope approach could emit more points than the limit when the
-  // chunk size was small (e.g. ceil(1500/600)=3 → 500 chunks × 4 = 2000 output).
-  final step = length / maxVisiblePoints;
+  final chunkSize = math.max(1, (length / maxVisiblePoints).ceil());
   final visible = <SamplePoint>[];
-  double cursor = 0.0;
-  while (visible.length < maxVisiblePoints) {
-    final idx = firstVisibleIndex + cursor.round();
-    if (idx >= endExclusive) break;
-    final candidate = points[idx];
-    if (visible.isEmpty ||
-        visible.last.timestampMs != candidate.timestampMs ||
-        visible.last.value != candidate.value) {
-      visible.add(candidate);
+  void appendUnique(SamplePoint point) {
+    if (visible.isNotEmpty &&
+        visible.last.timestampMs == point.timestampMs &&
+        visible.last.value == point.value) {
+      return;
     }
-    cursor += step;
+    visible.add(point);
   }
 
-  // Always anchor the rightmost sample so the trace reaches the screen edge
-  final lastPoint = points[endExclusive - 1];
-  if (visible.isEmpty ||
-      visible.last.timestampMs != lastPoint.timestampMs ||
-      visible.last.value != lastPoint.value) {
-    if (visible.length >= maxVisiblePoints) {
-      visible[maxVisiblePoints - 1] = lastPoint;
-    } else {
-      visible.add(lastPoint);
+  for (var start = firstVisibleIndex; start < endExclusive; start += chunkSize) {
+    final end = math.min(endExclusive, start + chunkSize);
+    var minPoint = points[start];
+    var maxPoint = points[start];
+    for (var index = start + 1; index < end; index++) {
+      final point = points[index];
+      if (point.value < minPoint.value) {
+        minPoint = point;
+      }
+      if (point.value > maxPoint.value) {
+        maxPoint = point;
+      }
     }
+    appendUnique(points[start]);
+    if (minPoint.timestampMs <= maxPoint.timestampMs) {
+      appendUnique(minPoint);
+      appendUnique(maxPoint);
+    } else {
+      appendUnique(maxPoint);
+      appendUnique(minPoint);
+    }
+    appendUnique(points[end - 1]);
+  }
+
+  // Safety cap: the per-chunk envelope can produce up to 4× chunks
+  // points; truncate if we overshot maxVisiblePoints.
+  if (visible.length > maxVisiblePoints) {
+    // Keep the last point as the right-edge anchor.
+    final anchor = visible.last;
+    visible.length = maxVisiblePoints;
+    visible[maxVisiblePoints - 1] = anchor;
   }
 
   return WaveformSlice(
@@ -1990,8 +2024,8 @@ class WaveformBuffer implements WaveformHistoryStore {
 
   void _trim() {
     // 60 s of 250-Hz ECG ≈ 15 000 points; 60000 was ~4× more than a 20-s window needs.
-    const maxRetainedPoints = 15000;
-    const compactionThreshold = 6000;
+    const maxRetainedPoints = 60000;
+    const compactionThreshold = 12000;
     final overflow = activeLength - maxRetainedPoints;
     if (overflow <= 0) {
       if (_startIndex >= compactionThreshold) {
@@ -2068,7 +2102,7 @@ class WaveformBuffer implements WaveformHistoryStore {
     if (needsRangeRebuild) {
       _recomputeRange();
     }
-    if (_startIndex >= 6000) {
+    if (_startIndex >= 12000) {
       _compact();
     }
   }

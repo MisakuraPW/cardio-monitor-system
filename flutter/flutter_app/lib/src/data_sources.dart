@@ -1406,6 +1406,12 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   @override
   Future<void> connect() async {
     await disconnect();
+    // Give the ESP32 BLE stack time to fully release the previous connection.
+    // Without this, the device may still be cleaning up and reject the new
+    // GATT handshake with "NetworkError: GATT Server is disconnected" or
+    // "NotSupportedError: GATT operation failed for unknown reason".
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+
     _emitStatus(AdapterState.connecting, '正在请求蓝牙设备访问权限...');
 
     final bluetooth = js_util.getProperty(html.window.navigator, 'bluetooth');
@@ -1415,79 +1421,135 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     }
 
     final options = _buildRequestOptions();
+
+    // ── Phase 1: device picker ──────────────────────────────────────
     try {
       _device = await js_util.promiseToFuture<dynamic>(
         js_util.callMethod(bluetooth, 'requestDevice', <dynamic>[options]),
       );
-
-      _disconnectCallback = js_util.allowInterop((dynamic _) {
-        _emitStatus(AdapterState.disconnected, '蓝牙设备已断开');
-      });
-      js_util.callMethod(
-        _device,
-        'addEventListener',
-        <dynamic>['gattserverdisconnected', _disconnectCallback],
-      );
-
-      final gatt = js_util.getProperty(_device, 'gatt');
-      _server = await js_util.promiseToFuture<dynamic>(
-        js_util.callMethod(gatt, 'connect', const <dynamic>[]),
-      );
-      _service = await js_util.promiseToFuture<dynamic>(
-        js_util.callMethod(
-          _server,
-          'getPrimaryService',
-          <dynamic>[config.serviceUuid],
-        ),
-      );
-      _notifyCharacteristic = await js_util.promiseToFuture<dynamic>(
-        js_util.callMethod(
-          _service,
-          'getCharacteristic',
-          <dynamic>[config.notifyCharacteristicUuid],
-        ),
-      );
-      _controlCharacteristic = await js_util.promiseToFuture<dynamic>(
-        js_util.callMethod(
-          _service,
-          'getCharacteristic',
-          <dynamic>[config.controlCharacteristicUuid],
-        ),
-      );
-      await js_util.promiseToFuture<dynamic>(
-        js_util.callMethod(
-          _notifyCharacteristic,
-          'startNotifications',
-          const <dynamic>[],
-        ),
-      );
-
-      _notificationCallback = js_util.allowInterop((dynamic event) {
-        _handleNotification(event);
-      });
-      js_util.callMethod(
-        _notifyCharacteristic,
-        'addEventListener',
-        <dynamic>['characteristicvaluechanged', _notificationCallback],
-      );
-
-      _receiveBuffer.clear();
-      _currentCatalog = const <ChannelDescriptor>[];
-      final deviceName =
-          (js_util.getProperty(_device, 'name') ?? config.deviceNamePrefix)
-              .toString()
-              .trim();
-      _deviceId = deviceName.isEmpty ? config.deviceNamePrefix : deviceName;
-      _sessionId = 'ble-${DateTime.now().millisecondsSinceEpoch}';
-      _emitStatus(AdapterState.streaming, '蓝牙已连接: $_deviceId，等待 BIO1 二进制数据...');
     } catch (error) {
-      _emitStatus(AdapterState.error, '蓝牙连接失败: $error');
+      _emitStatus(AdapterState.error, '未选择蓝牙设备: $error');
       rethrow;
     }
+
+    _disconnectCallback = js_util.allowInterop((dynamic _) {
+      _emitStatus(AdapterState.disconnected, '蓝牙设备已断开');
+    });
+    js_util.callMethod(
+      _device,
+      'addEventListener',
+      <dynamic>['gattserverdisconnected', _disconnectCallback],
+    );
+
+    // ── Phase 2: GATT connect + service discovery (with retries) ────
+    const maxAttempts = 3;
+    var attempt = 0;
+    Object? lastError;
+
+    while (attempt < maxAttempts) {
+      attempt++;
+      try {
+        // Small stagger before each GATT attempt
+        if (attempt > 1) {
+          await Future<void>.delayed(
+              Duration(milliseconds: 400 * attempt));
+        }
+
+        final gatt = js_util.getProperty(_device, 'gatt');
+        _emitStatus(AdapterState.connecting,
+            '正在建立 GATT 连接 (第 $attempt 次)...');
+        _server = await js_util.promiseToFuture<dynamic>(
+          js_util.callMethod(gatt, 'connect', const <dynamic>[]),
+        );
+
+        _service = await js_util.promiseToFuture<dynamic>(
+          js_util.callMethod(
+            _server,
+            'getPrimaryService',
+            <dynamic>[config.serviceUuid],
+          ),
+        );
+
+        _notifyCharacteristic = await js_util.promiseToFuture<dynamic>(
+          js_util.callMethod(
+            _service,
+            'getCharacteristic',
+            <dynamic>[config.notifyCharacteristicUuid],
+          ),
+        );
+
+        _controlCharacteristic = await js_util.promiseToFuture<dynamic>(
+          js_util.callMethod(
+            _service,
+            'getCharacteristic',
+            <dynamic>[config.controlCharacteristicUuid],
+          ),
+        );
+
+        await js_util.promiseToFuture<dynamic>(
+          js_util.callMethod(
+            _notifyCharacteristic,
+            'startNotifications',
+            const <dynamic>[],
+          ),
+        );
+
+        // All GATT steps succeeded — exit retry loop
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+        // Clean up partial GATT state before retrying
+        try {
+          if (_server != null) {
+            js_util.callMethod(_server, 'disconnect', const <dynamic>[]);
+          }
+        } catch (_) {}
+        _server = null;
+        _service = null;
+        _notifyCharacteristic = null;
+        _controlCharacteristic = null;
+
+        if (attempt < maxAttempts) {
+          _emitStatus(AdapterState.connecting,
+              'GATT 连接失败，${400 * attempt}ms 后重试 ($attempt/$maxAttempts)');
+        }
+      }
+    }
+
+    if (lastError != null) {
+      _emitStatus(
+          AdapterState.error, '蓝牙 GATT 连接失败（已重试 $maxAttempts 次）: $lastError');
+      throw lastError;
+    }
+
+    // ── Phase 3: wire up notifications ──────────────────────────────
+    _notificationCallback = js_util.allowInterop((dynamic event) {
+      _handleNotification(event);
+    });
+    js_util.callMethod(
+      _notifyCharacteristic,
+      'addEventListener',
+      <dynamic>['characteristicvaluechanged', _notificationCallback],
+    );
+
+    _receiveBuffer.clear();
+    _currentCatalog = const <ChannelDescriptor>[];
+    final deviceName =
+        (js_util.getProperty(_device, 'name') ?? config.deviceNamePrefix)
+            .toString()
+            .trim();
+    _deviceId = deviceName.isEmpty ? config.deviceNamePrefix : deviceName;
+    _sessionId = 'ble-${DateTime.now().millisecondsSinceEpoch}';
+    _emitStatus(
+        AdapterState.streaming, '蓝牙已连接: $_deviceId，等待 BIO1 二进制数据...');
   }
 
   dynamic _buildRequestOptions() {
     final prefix = config.deviceNamePrefix.trim();
+    // Always list the service as optional so we can access it after connecting,
+    // but do NOT require it in the advertisement filter — many ESP32 firmwares
+    // don't include the custom UUID in the BLE advertisement payload.
     final options = <String, dynamic>{
       'optionalServices': <String>[config.serviceUuid],
     };
@@ -1495,7 +1557,6 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       options['filters'] = <Map<String, dynamic>>[
         <String, dynamic>{
           'namePrefix': prefix,
-          'services': <String>[config.serviceUuid],
         },
       ];
     } else {
