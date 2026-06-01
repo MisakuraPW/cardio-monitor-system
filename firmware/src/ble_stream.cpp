@@ -31,7 +31,10 @@ bool g_enableTemp = true;
 uint16_t g_mtu = 23;
 size_t g_notifyPayloadMax = BLE_NOTIFY_PAYLOAD_FALLBACK;
 
-uint32_t g_bleSeq = 0;
+uint32_t g_bleAggregateSeq = 0;
+uint32_t g_bleEcgSeq = 0;
+uint32_t g_blePpgSeq = 0;
+uint32_t g_bleTempSeq = 0;
 uint32_t g_dropEcg = 0;
 uint32_t g_dropPpg = 0;
 uint32_t g_dropTemp = 0;
@@ -41,6 +44,7 @@ uint32_t g_overwriteTemp = 0;
 uint32_t g_notifyFail = 0;
 
 constexpr size_t kBlePayloadBuffer = 512;
+constexpr size_t kBio3HeaderLen = 20;
 constexpr size_t kEcgBatchMax = 10;
 constexpr size_t kPpgBatchMax = 4;
 constexpr size_t kTempBatchMax = 4;
@@ -336,11 +340,49 @@ void finishBio2Frame(uint8_t* payload, const size_t payloadOffset, const size_t 
   appendU32Le(&payload[15], crc32(payload + payloadOffset, payloadLen));
 }
 
+size_t beginBio3Frame(uint8_t* payload,
+                      const size_t capacity,
+                      const uint32_t seq,
+                      const uint16_t ecgCount,
+                      const uint16_t ppgCount,
+                      const uint16_t payloadLen) {
+  if (payload == nullptr || capacity < kBio3HeaderLen) {
+    return 0;
+  }
+  size_t off = 0;
+  payload[off++] = 'B';
+  payload[off++] = 'I';
+  payload[off++] = 'O';
+  payload[off++] = '3';
+  payload[off++] = 1;
+  payload[off++] = 0;
+  appendU32Le(&payload[off], seq);
+  off += 4;
+  appendU16Le(&payload[off], ecgCount);
+  off += 2;
+  appendU16Le(&payload[off], ppgCount);
+  off += 2;
+  appendU16Le(&payload[off], payloadLen);
+  off += 2;
+  appendU32Le(&payload[off], 0);
+  off += 4;
+  return off;
+}
+
+void finishBio3Frame(uint8_t* payload, const size_t payloadOffset, const size_t payloadLen) {
+  appendU32Le(&payload[16], crc32(payload + payloadOffset, payloadLen));
+}
+
 size_t maxSamplesForNotify(const size_t sampleSize, const size_t hardMax) {
   if (g_notifyPayloadMax <= 19U || sampleSize == 0) {
     return 0;
   }
   return minSize(hardMax, (g_notifyPayloadMax - 19U) / sampleSize);
+}
+
+bool canSendFullAggregateFrame() {
+  constexpr size_t kFullAggregateLen = kBio3HeaderLen + (kEcgBatchMax * 12U) + (kPpgBatchMax * 16U);
+  return g_notifyPayloadMax >= kFullAggregateLen;
 }
 
 template <typename T>
@@ -386,7 +428,7 @@ void publishEcgSamples() {
     return;
   }
 
-  const uint32_t seq = g_bleSeq++;
+  const uint32_t seq = g_bleEcgSeq++;
 
   uint8_t payload[kBlePayloadBuffer] = {};
   const uint16_t payloadLen = static_cast<uint16_t>(n * 12U);
@@ -421,7 +463,7 @@ void publishPpgSamples() {
     return;
   }
 
-  const uint32_t seq = g_bleSeq++;
+  const uint32_t seq = g_blePpgSeq++;
 
   uint8_t payload[kBlePayloadBuffer] = {};
   const uint16_t payloadLen = static_cast<uint16_t>(n * 16U);
@@ -444,6 +486,60 @@ void publishPpgSamples() {
   (void)sendNotifyPayload(payload, off);
 }
 
+void publishAggregateSamples() {
+  if (!g_enableEcg || !g_enablePpg || g_ecgBleQueue == nullptr || g_ppgBleQueue == nullptr) {
+    publishEcgSamples();
+    vTaskDelay(pdMS_TO_TICKS(2));
+    publishPpgSamples();
+    return;
+  }
+
+  EcgSample ecgBatch[kEcgBatchMax];
+  PpgSample ppgBatch[kPpgBatchMax];
+  const size_t ecgCount = dequeueBatch(g_ecgBleQueue, ecgBatch, kEcgBatchMax);
+  const size_t ppgCount = dequeueBatch(g_ppgBleQueue, ppgBatch, kPpgBatchMax);
+  if (ecgCount == 0 && ppgCount == 0) {
+    return;
+  }
+
+  const uint16_t payloadLen = static_cast<uint16_t>((ecgCount * 12U) + (ppgCount * 16U));
+  if (kBio3HeaderLen + payloadLen > kBlePayloadBuffer ||
+      kBio3HeaderLen + payloadLen > g_notifyPayloadMax) {
+    ++g_notifyFail;
+    return;
+  }
+
+  const uint32_t seq = g_bleAggregateSeq++;
+  uint8_t payload[kBlePayloadBuffer] = {};
+  const size_t payloadOffset = beginBio3Frame(payload,
+                                             sizeof(payload),
+                                             seq,
+                                             static_cast<uint16_t>(ecgCount),
+                                             static_cast<uint16_t>(ppgCount),
+                                             payloadLen);
+  size_t off = payloadOffset;
+
+  for (size_t i = 0; i < ecgCount; ++i) {
+    appendU64Le(&payload[off], ecgBatch[i].ts_us);
+    off += 8;
+    appendU16Le(&payload[off], ecgBatch[i].raw_adc);
+    off += 2;
+    payload[off++] = static_cast<uint8_t>(ecgBatch[i].lead_off_plus ? 1 : 0);
+    payload[off++] = static_cast<uint8_t>(ecgBatch[i].lead_off_minus ? 1 : 0);
+  }
+  for (size_t i = 0; i < ppgCount; ++i) {
+    appendU64Le(&payload[off], ppgBatch[i].ts_us);
+    off += 8;
+    appendU32Le(&payload[off], ppgBatch[i].ir);
+    off += 4;
+    appendU32Le(&payload[off], ppgBatch[i].red);
+    off += 4;
+  }
+  finishBio3Frame(payload, payloadOffset, off - payloadOffset);
+
+  (void)sendNotifyPayload(payload, off);
+}
+
 void publishTemperatureSamples() {
   if (!g_enableTemp || g_tempBleQueue == nullptr) {
     return;
@@ -456,7 +552,7 @@ void publishTemperatureSamples() {
     return;
   }
 
-  const uint32_t seq = g_bleSeq++;
+  const uint32_t seq = g_bleTempSeq++;
 
   uint8_t payload[kBlePayloadBuffer] = {};
   const uint16_t payloadLen = static_cast<uint16_t>(n * 15U);
@@ -621,10 +717,14 @@ void taskLoop() {
     }
 
     if (g_active && g_connected && g_subscribed) {
-      publishEcgSamples();
-      vTaskDelay(pdMS_TO_TICKS(2));  // Small gap between sensor types
-      publishPpgSamples();
-      vTaskDelay(pdMS_TO_TICKS(2));
+      if (canSendFullAggregateFrame()) {
+        publishAggregateSamples();
+      } else {
+        publishEcgSamples();
+        vTaskDelay(pdMS_TO_TICKS(2));  // Low-MTU fallback.
+        publishPpgSamples();
+        vTaskDelay(pdMS_TO_TICKS(2));
+      }
       publishTemperatureSamples();
     }
 

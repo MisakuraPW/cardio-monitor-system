@@ -76,6 +76,7 @@ class _Bio1DecodedBatch {
 class _Bio1BinaryCodec {
   static const int _bio1HeaderLength = 11;
   static const int _bio2HeaderLength = 19;
+  static const int _bio3HeaderLength = 20;
 
   static _Bio1DecodedBatch decode(
     Uint8List bytes, {
@@ -90,15 +91,81 @@ class _Bio1BinaryCodec {
     while (cursor <= bytes.length - _bio1HeaderLength) {
       final bio1Index = _indexOfMagic(bytes, cursor, 0x31);
       final bio2Index = _indexOfMagic(bytes, cursor, 0x32);
-      final magicIndex = _firstNonNegative(bio1Index, bio2Index);
+      final bio3Index = _indexOfMagic(bytes, cursor, 0x33);
+      final magicIndex = _firstNonNegative3(bio1Index, bio2Index, bio3Index);
       if (magicIndex < 0 || magicIndex + _bio1HeaderLength > bytes.length) {
         break;
       }
 
       final isBio2 = bio2Index >= 0 && bio2Index == magicIndex;
-      final headerLength = isBio2 ? _bio2HeaderLength : _bio1HeaderLength;
+      final isBio3 = bio3Index >= 0 && bio3Index == magicIndex;
+      final headerLength = isBio3
+          ? _bio3HeaderLength
+          : isBio2
+              ? _bio2HeaderLength
+              : _bio1HeaderLength;
       if (magicIndex + headerLength > bytes.length) {
         break;
+      }
+
+      if (isBio3) {
+        final header = ByteData.sublistView(bytes, magicIndex, magicIndex + headerLength);
+        final seq = header.getUint32(6, Endian.little);
+        final ecgCount = header.getUint16(10, Endian.little);
+        final ppgCount = header.getUint16(12, Endian.little);
+        final payloadLength = header.getUint16(14, Endian.little);
+        final expectedPayloadLength = ecgCount * 12 + ppgCount * 16;
+        final frameLength = headerLength + payloadLength;
+        if ((ecgCount == 0 && ppgCount == 0) || magicIndex + frameLength > bytes.length) {
+          break;
+        }
+        if (payloadLength != expectedPayloadLength) {
+          cursor = magicIndex + 1;
+          continue;
+        }
+
+        var decodeStatus = 'ok';
+        final expectedCrc = header.getUint32(16, Endian.little);
+        final actualCrc = _crc32(bytes, magicIndex + headerLength, payloadLength);
+        if (actualCrc != expectedCrc) {
+          decodeStatus = 'crc_error';
+        }
+
+        final data = ByteData.sublistView(bytes, magicIndex, magicIndex + frameLength);
+        if (ecgCount > 0) {
+          _decodeEcg(
+            data,
+            seq: seq,
+            sampleCount: ecgCount,
+            sampleSize: 12,
+            deviceId: deviceId,
+            sessionId: sessionId,
+            frames: frames,
+            channels: channels,
+            payloadOffset: headerLength,
+            frameVersion: 3,
+            decodeStatus: decodeStatus,
+            transport: transport,
+          );
+        }
+        if (ppgCount > 0) {
+          _decodePpg(
+            data,
+            seq: seq,
+            sampleCount: ppgCount,
+            sampleSize: 16,
+            deviceId: deviceId,
+            sessionId: sessionId,
+            frames: frames,
+            channels: channels,
+            payloadOffset: headerLength + ecgCount * 12,
+            frameVersion: 3,
+            decodeStatus: decodeStatus,
+            transport: transport,
+          );
+        }
+        cursor = magicIndex + frameLength;
+        continue;
       }
 
       final typeByte = bytes[magicIndex + (isBio2 ? 5 : 4)];
@@ -257,7 +324,9 @@ class _Bio1BinaryCodec {
   }
 
   static bool looksLikeBio1(Uint8List bytes) =>
-      _indexOfMagic(bytes, 0, 0x31) >= 0 || _indexOfMagic(bytes, 0, 0x32) >= 0;
+      _indexOfMagic(bytes, 0, 0x31) >= 0 ||
+      _indexOfMagic(bytes, 0, 0x32) >= 0 ||
+      _indexOfMagic(bytes, 0, 0x33) >= 0;
 
   static void _decodeEcg(
     ByteData data, {
@@ -597,6 +666,11 @@ class _Bio1BinaryCodec {
       return a;
     }
     return a < b ? a : b;
+  }
+
+  static int _firstNonNegative3(int a, int b, int c) {
+    final first = _firstNonNegative(a, b);
+    return _firstNonNegative(first, c);
   }
 
   static int _crc32(Uint8List bytes, int offset, int length) {
@@ -1630,9 +1704,44 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     }
 
     final isBio2 = _receiveBuffer[3] == 0x32;
-    final headerLength = isBio2 ? 19 : 11;
+    final isBio3 = _receiveBuffer[3] == 0x33;
+    final headerLength = isBio3 ? 20 : isBio2 ? 19 : 11;
     if (_receiveBuffer.length < headerLength) {
       return false;
+    }
+
+    if (isBio3) {
+      final header = ByteData.sublistView(Uint8List.fromList(_receiveBuffer.sublist(0, headerLength)));
+      final ecgCount = header.getUint16(10, Endian.little);
+      final ppgCount = header.getUint16(12, Endian.little);
+      final payloadLength = header.getUint16(14, Endian.little);
+      final expectedPayloadLength = ecgCount * 12 + ppgCount * 16;
+      final frameLength = headerLength + payloadLength;
+      if (payloadLength != expectedPayloadLength) {
+        _receiveBuffer.removeAt(0);
+        return true;
+      }
+      if (_receiveBuffer.length < frameLength) {
+        return false;
+      }
+
+      final frameBytes = Uint8List.fromList(_receiveBuffer.sublist(0, frameLength));
+      _receiveBuffer.removeRange(0, frameLength);
+      final batch = _Bio1BinaryCodec.decode(
+        frameBytes,
+        deviceId: _deviceId,
+        sessionId: _sessionId,
+        transport: 'ble_binary',
+      );
+      if (batch.isEmpty) {
+        _emitStatus(AdapterState.error, 'BLE BIO frame parse failed');
+      } else {
+        _mergeCatalog(batch.channels);
+        for (final frame in batch.frames) {
+          _frameController.add(frame);
+        }
+      }
+      return true;
     }
 
     final typeByte = _receiveBuffer[isBio2 ? 5 : 4];
@@ -2040,7 +2149,9 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       if (buffer[index] == 0x42 &&
           buffer[index + 1] == 0x49 &&
           buffer[index + 2] == 0x4F &&
-          (buffer[index + 3] == 0x31 || buffer[index + 3] == 0x32)) {
+          (buffer[index + 3] == 0x31 ||
+              buffer[index + 3] == 0x32 ||
+              buffer[index + 3] == 0x33)) {
         return index;
       }
     }
