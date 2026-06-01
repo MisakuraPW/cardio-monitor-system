@@ -9,6 +9,8 @@ import 'data_sources.dart';
 import 'models.dart';
 
 class MonitorController extends ChangeNotifier {
+  static const double _initialBufferTargetSeconds = 15;
+
   MonitorController()
       : mqttConfig = MqttAdapterConfig(),
         bluetoothConfig = BluetoothAdapterConfig(),
@@ -24,7 +26,9 @@ class MonitorController extends ChangeNotifier {
     );
     _bindAdapter(_mqttAdapter);
     _uiTickTimer = Timer.periodic(const Duration(milliseconds: 50), (_) {
-      if (!_hasPendingFrameNotify) {
+      final shouldAdvancePlayback =
+          isConnected && !isPaused && !isStartupBuffering && mode != DataSourceMode.file;
+      if (!_hasPendingFrameNotify && !shouldAdvancePlayback) {
         return;
       }
       _hasPendingFrameNotify = false;
@@ -66,6 +70,7 @@ class MonitorController extends ChangeNotifier {
   String _lastCatalogSignature = '';
   final Map<String, int> _lastDisplayTimestampMsByChannel = <String, int>{};
   final Map<String, int> _lastAcceptedSeqByChannel = <String, int>{};
+  final Set<String> _initiallyFilledChannels = <String>{};
   final Map<String, double> _latestImuValues = <String, double>{};
   int _latestImuReceivedAtMs = 0;
   double? _latestTemperatureCelsius;
@@ -83,7 +88,8 @@ class MonitorController extends ChangeNotifier {
   MedicalReport? report;
 
   int latestTimestampMs = 0;
-  int _displayAnchorMs = 0; // smoothed anchor — never jumps more than 250 ms / tick
+  int _displayAnchorMs = 0;
+  int _lastAnchorWallMs = 0;
   int? _pauseReferenceTimestampMs;
   bool isPaused = false;
   double secondsPerScreen = 6;
@@ -119,12 +125,11 @@ class MonitorController extends ChangeNotifier {
       isConnected &&
       !isPaused &&
       mode != DataSourceMode.file &&
-      _liveVisibleBufferDurationSeconds() < _requiredLiveBufferSeconds;
-  double get startupBufferProgress => _requiredLiveBufferSeconds <= 0
-      ? 1
-      : (_liveVisibleBufferDurationSeconds() / _requiredLiveBufferSeconds).clamp(0.0, 1.0);
-  double get _requiredLiveBufferSeconds =>
-      math.max(0, startupBufferSeconds) + math.max(0, secondsPerScreen);
+      !_hasAnyInitialChannelReady();
+  double get startupBufferProgress => _initialBufferProgress();
+  double get _requiredLiveBufferSeconds => _initialBufferTargetSeconds;
+  double get _targetPlaybackLagSeconds =>
+      math.max(liveDisplayLagSeconds, _initialBufferTargetSeconds - secondsPerScreen);
   int get _liveRetentionMs =>
       (math.max(30.0, _requiredLiveBufferSeconds + 10.0) * 1000).round();
   bool get isEcgWorn => _latestEcgLeadOn ?? true;
@@ -259,6 +264,7 @@ class MonitorController extends ChangeNotifier {
     _runtimeStats.clear();
     _lastDisplayTimestampMsByChannel.clear();
     _lastAcceptedSeqByChannel.clear();
+    _initiallyFilledChannels.clear();
     _latestImuValues.clear();
     _latestImuReceivedAtMs = 0;
     _latestTemperatureCelsius = null;
@@ -270,6 +276,7 @@ class MonitorController extends ChangeNotifier {
     analysisJob = null;
     latestTimestampMs = 0;
     _displayAnchorMs = 0;
+    _lastAnchorWallMs = 0;
     isPaused = false;
     historyOffsetSeconds = 0;
     _pauseReferenceTimestampMs = null;
@@ -403,7 +410,7 @@ class MonitorController extends ChangeNotifier {
   }
 
   WaveformSlice visibleWaveform(String channelKey) {
-    if (!isPaused && isStartupBuffering) {
+    if (!isPaused && _shouldHoldChannelForInitialFill(channelKey)) {
       return WaveformSlice.empty;
     }
     if (_isEcgChannel(channelKey) && !isEcgWorn) {
@@ -573,6 +580,9 @@ class MonitorController extends ChangeNotifier {
       () => WaveformBuffer(channelKey: frame.channelKey),
     );
     buffer.appendFrame(frame);
+    if (buffer.activeLength >= _initialSampleThresholdForChannel(frame.channelKey)) {
+      _initiallyFilledChannels.add(frame.channelKey);
+    }
     _runtimeStats
         .putIfAbsent(
           frame.channelKey,
@@ -784,9 +794,6 @@ class MonitorController extends ChangeNotifier {
     if (frame.samples.isEmpty) {
       return null;
     }
-    if (mode == DataSourceMode.file) {
-      return frame;
-    }
 
     final previousDisplayTimestamp = _lastDisplayTimestampMsByChannel[frame.channelKey];
     final lastSeq = _lastAcceptedSeqByChannel[frame.channelKey];
@@ -800,31 +807,16 @@ class MonitorController extends ChangeNotifier {
 
     final displayRate = _nominalDisplaySampleRate(frame.channelKey, frame.sampleRate);
     final stepMs = math.max(1, (1000 / displayRate).round());
-    final incomingTimestamps = frame.sampleTimestampsMs;
-    final timestampsLookSane = _canTrustFrameTimestamps(
-      frame: frame,
-      nominalRate: displayRate,
-      previousTimestampMs: previousDisplayTimestamp,
-    );
-    final trustIncoming = mode == DataSourceMode.file && timestampsLookSane;
-
     final normalizedTimestamps = <int>[];
-    if (trustIncoming && incomingTimestamps != null) {
-      normalizedTimestamps.addAll(incomingTimestamps);
-    } else {
-      final startTimestamp = previousDisplayTimestamp == null
-          ? (frame.receivedAtMs > 0 ? frame.receivedAtMs : frame.timestampMs)
-          : previousDisplayTimestamp + stepMs;
-      for (var index = 0; index < frame.samples.length; index++) {
-        normalizedTimestamps.add(startTimestamp + stepMs * index);
-      }
+    final startTimestamp = previousDisplayTimestamp == null
+        ? (frame.receivedAtMs > 0 ? frame.receivedAtMs : frame.timestampMs)
+        : previousDisplayTimestamp + stepMs;
+    for (var index = 0; index < frame.samples.length; index++) {
+      normalizedTimestamps.add(startTimestamp + stepMs * index);
     }
 
     _lastDisplayTimestampMsByChannel[frame.channelKey] = normalizedTimestamps.last;
     _lastAcceptedSeqByChannel[frame.channelKey] = frame.seq;
-    if (trustIncoming && displayRate == frame.sampleRate) {
-      return frame;
-    }
 
     return SignalFrame(
       deviceId: frame.deviceId,
@@ -845,42 +837,6 @@ class MonitorController extends ChangeNotifier {
     );
   }
 
-  bool _canTrustFrameTimestamps({
-    required SignalFrame frame,
-    required double nominalRate,
-    required int? previousTimestampMs,
-  }) {
-    final timestamps = frame.sampleTimestampsMs;
-    if (frame.transport.startsWith('ble_')) {
-      return false;
-    }
-    if (timestamps == null || timestamps.length != frame.samples.length || timestamps.isEmpty) {
-      return false;
-    }
-    if (previousTimestampMs != null) {
-      final firstGapMs = timestamps.first - previousTimestampMs;
-      final expectedStepMs = math.max(1, (1000 / nominalRate).round());
-      if (firstGapMs <= 0 || firstGapMs > math.max(1000, expectedStepMs * frame.samples.length * 4)) {
-        return false;
-      }
-    }
-    var positiveDeltaCount = 0;
-    var totalDelta = 0;
-    for (var index = 1; index < timestamps.length; index++) {
-      final delta = timestamps[index] - timestamps[index - 1];
-      if (delta <= 0) {
-        return false;
-      }
-      totalDelta += delta;
-      positiveDeltaCount += 1;
-    }
-    if (positiveDeltaCount == 0) {
-      return true;
-    }
-    final observedRate = 1000.0 / (totalDelta / positiveDeltaCount);
-    return observedRate >= nominalRate * 0.65 && observedRate <= nominalRate * 1.35;
-  }
-
   double _nominalDisplaySampleRate(String channelKey, double fallback) {
     if (channelKey.startsWith('ecg')) {
       return 500;
@@ -896,32 +852,85 @@ class MonitorController extends ChangeNotifier {
       return currentAnchorTimestampMs;
     }
     final store = _waveformStoreFor(channelKey);
+    if (mode != DataSourceMode.file) {
+      return _liveAnchorTimestampMs();
+    }
     if (store != null && store.hasPoints) {
-      final lagSeconds = _effectiveLiveDisplayLagSeconds(store);
-      return store.latestPointTimestampMs - (lagSeconds * 1000).round();
+      return store.latestPointTimestampMs;
     }
     return currentAnchorTimestampMs;
   }
 
-  double _effectiveLiveDisplayLagSeconds(WaveformHistoryStore store) {
-    if (mode == DataSourceMode.file || isPaused) {
-      return liveDisplayLagSeconds;
-    }
-    return math.max(liveDisplayLagSeconds, startupBufferSeconds);
-  }
-
-  double _liveVisibleBufferDurationSeconds() {
-    var longest = 0.0;
+  bool _hasAnyInitialChannelReady() {
     for (final ChannelDescriptor descriptor in visibleChannels) {
-      final store = _buffers[descriptor.key];
-      if (store == null || !store.hasPoints) {
+      final buffer = _buffers[descriptor.key];
+      if (buffer == null || !buffer.hasPoints) {
         continue;
       }
-      final duration =
-          (store.latestPointTimestampMs - store.oldestTimestampMs) / 1000.0;
-      longest = math.max(longest, duration);
+      if (_initiallyFilledChannels.contains(descriptor.key) ||
+          buffer.activeLength >= _initialSampleThreshold(descriptor)) {
+        return true;
+      }
     }
-    return longest;
+    return false;
+  }
+
+  bool _shouldHoldChannelForInitialFill(String channelKey) {
+    if (mode == DataSourceMode.file) {
+      return false;
+    }
+    if (isPaused || _initiallyFilledChannels.contains(channelKey)) {
+      return false;
+    }
+    final descriptor = _descriptorForChannel(channelKey);
+    final buffer = _buffers[channelKey];
+    if (descriptor == null || buffer == null || !buffer.hasPoints) {
+      return mode != DataSourceMode.file;
+    }
+    return buffer.activeLength < _initialSampleThreshold(descriptor);
+  }
+
+  double _initialBufferProgress() {
+    var best = 0.0;
+    for (final ChannelDescriptor descriptor in visibleChannels) {
+      final buffer = _buffers[descriptor.key];
+      if (buffer == null || !buffer.hasPoints) {
+        continue;
+      }
+      final required = _initialSampleThreshold(descriptor);
+      if (required <= 0) {
+        best = 1;
+        continue;
+      }
+      best = math.max(best, buffer.activeLength / required);
+    }
+    return best.clamp(0.0, 1.0).toDouble();
+  }
+
+  int _initialSampleThresholdForChannel(String channelKey) {
+    final descriptor = _descriptorForChannel(channelKey);
+    if (descriptor == null) {
+      return math.max(96, (secondsPerScreen * 100).round());
+    }
+    return _initialSampleThreshold(descriptor);
+  }
+
+  int _initialSampleThreshold(ChannelDescriptor descriptor) {
+    final rate = _nominalDisplaySampleRate(descriptor.key, descriptor.sampleRate);
+    final samplesForTarget = (rate * _initialBufferTargetSeconds).round();
+    if (rate < 20) {
+      return math.max(4, math.min(64, samplesForTarget));
+    }
+    return math.max(96, math.min(12000, samplesForTarget));
+  }
+
+  ChannelDescriptor? _descriptorForChannel(String channelKey) {
+    for (final ChannelDescriptor descriptor in _channelCatalog) {
+      if (descriptor.key == channelKey) {
+        return descriptor;
+      }
+    }
+    return null;
   }
 
   void _observeImuFrame(SignalFrame frame) {
@@ -1317,37 +1326,36 @@ class MonitorController extends ChangeNotifier {
   }
 
   int _liveAnchorTimestampMs() {
-    final liveBase = latestTimestampMs == 0
-        ? DateTime.now().millisecondsSinceEpoch
-        : latestTimestampMs;
-    final target = liveBase - (liveDisplayLagSeconds * 1000).round();
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (latestTimestampMs == 0) {
+      return nowMs;
+    }
 
     if (_displayAnchorMs == 0) {
-      _displayAnchorMs = target;
-      return target;
+      _displayAnchorMs = latestTimestampMs - (_targetPlaybackLagSeconds * 1000).round();
+      _lastAnchorWallMs = nowMs;
+      return _displayAnchorMs;
     }
 
-    // MQTT delivers frames in bursts.  The first frame of a burst may carry
-    // a timestamp seconds ahead of the bulk of the data (out-of-order
-    // delivery on QoS 0).  If we let the anchor jump to that spike instantly
-    // the viewport leaps past the buffered samples that follow — those
-    // samples then fall below the visible window, the waveform freezes, and
-    // the user sees the dreaded "scan-mode" sweep when the gap eventually
-    // fills in.
-    //
-    // Cap the per‑tick advance to 250 ms.  With the 50‑ms UI timer this
-    // still lets the display catch up at 5× real‑time, so live scrolling
-    // (which needs only ~50 ms / tick) is unaffected.
-    const maxAdvancePerTick = 250;
-    if (target > _displayAnchorMs + maxAdvancePerTick) {
-      _displayAnchorMs += maxAdvancePerTick;
-    } else if (target < _displayAnchorMs) {
-      // Anchor went backwards (pause, history, device reboot) — follow
-      // immediately so the user sees the correct position.
-      _displayAnchorMs = target;
+    final rawElapsedMs = _lastAnchorWallMs == 0 ? 0 : nowMs - _lastAnchorWallMs;
+    final elapsedMs = rawElapsedMs < 0 ? 0 : math.min(250, rawElapsedMs);
+    _lastAnchorWallMs = nowMs;
+
+    final targetAnchor = latestTimestampMs - (_targetPlaybackLagSeconds * 1000).round();
+    final maxAnchor = latestTimestampMs - 120;
+    var next = _displayAnchorMs;
+    if (targetAnchor > next + 500) {
+      next += math.min(250, elapsedMs * 5);
     } else {
-      _displayAnchorMs = target;
+      next += elapsedMs;
     }
+    if (next > maxAnchor) {
+      next = maxAnchor;
+    }
+    if (next < _displayAnchorMs && maxAnchor >= _displayAnchorMs) {
+      next = _displayAnchorMs;
+    }
+    _displayAnchorMs = next;
     return _displayAnchorMs;
   }
 
