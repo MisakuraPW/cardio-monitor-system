@@ -1800,8 +1800,11 @@ class _WaveformPainter extends CustomPainter {
     final renderPoints = _downsamplePoints(points, maxPoints: math.max(96, size.width.round() * 2));
     final offsets = renderPoints
         .map((SamplePoint point) => Offset(
-              chartLeft + ((point.timestampMs - startMs) / windowMs) * chartWidth,
-              viewport.dyForValue(value: point.value, gain: gain, height: size.height),
+              (chartLeft +
+                      ((point.timestampMs - startMs) / windowMs) * chartWidth)
+                  .clamp(chartLeft, chartRight),
+              viewport.dyForValue(
+                  value: point.value, gain: gain, height: size.height),
             ))
         .toList(growable: false);
 

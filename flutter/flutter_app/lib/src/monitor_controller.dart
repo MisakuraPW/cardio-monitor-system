@@ -496,6 +496,21 @@ class MonitorController extends ChangeNotifier {
       return;
     }
     final frameLatestTimestampMs = _latestFrameTimestampMs(frame);
+
+    // Detect ESP32 reboot: timestamps from esp_timer_get_time() reset to near 0
+    // after the device restarts. A drop > 60 s (relative) is treated as a reboot.
+    const timestampResetThresholdMs = 60000;
+    if (latestTimestampMs > 0 &&
+        frameLatestTimestampMs < latestTimestampMs - timestampResetThresholdMs) {
+      // Purge all buffers so stale high-timestamp data doesn't pin the viewport
+      // in the future while new (post-reboot) data has low timestamps.
+      _buffers.clear();
+      _runtimeStats.clear();
+      latestTimestampMs = 0; // reset anchor so the next line re-baselines on new data
+      _pushEvent('检测到设备时间戳回跳（疑似重启），已重置波形缓存');
+      _scheduleNotify();
+    }
+
     latestTimestampMs = latestTimestampMs == 0
         ? frameLatestTimestampMs
         : math.max(latestTimestampMs, frameLatestTimestampMs);
@@ -1651,39 +1666,34 @@ WaveformSlice _buildWaveformSlice(
     );
   }
 
-  final chunkSize = math.max(1, (length / maxVisiblePoints).ceil());
+  // ★ Fixed: strict uniform-step downsampling that guarantees output ≤ maxVisiblePoints.
+  // The old min/max-envelope approach could emit more points than the limit when the
+  // chunk size was small (e.g. ceil(1500/600)=3 → 500 chunks × 4 = 2000 output).
+  final step = length / maxVisiblePoints;
   final visible = <SamplePoint>[];
-  void appendUnique(SamplePoint point) {
-    if (visible.isNotEmpty &&
-        visible.last.timestampMs == point.timestampMs &&
-        visible.last.value == point.value) {
-      return;
+  double cursor = 0.0;
+  while (visible.length < maxVisiblePoints) {
+    final idx = firstVisibleIndex + cursor.round();
+    if (idx >= endExclusive) break;
+    final candidate = points[idx];
+    if (visible.isEmpty ||
+        visible.last.timestampMs != candidate.timestampMs ||
+        visible.last.value != candidate.value) {
+      visible.add(candidate);
     }
-    visible.add(point);
+    cursor += step;
   }
 
-  for (var start = firstVisibleIndex; start < endExclusive; start += chunkSize) {
-    final end = math.min(endExclusive, start + chunkSize);
-    var minPoint = points[start];
-    var maxPoint = points[start];
-    for (var index = start + 1; index < end; index++) {
-      final point = points[index];
-      if (point.value < minPoint.value) {
-        minPoint = point;
-      }
-      if (point.value > maxPoint.value) {
-        maxPoint = point;
-      }
-    }
-    appendUnique(points[start]);
-    if (minPoint.timestampMs <= maxPoint.timestampMs) {
-      appendUnique(minPoint);
-      appendUnique(maxPoint);
+  // Always anchor the rightmost sample so the trace reaches the screen edge
+  final lastPoint = points[endExclusive - 1];
+  if (visible.isEmpty ||
+      visible.last.timestampMs != lastPoint.timestampMs ||
+      visible.last.value != lastPoint.value) {
+    if (visible.length >= maxVisiblePoints) {
+      visible[maxVisiblePoints - 1] = lastPoint;
     } else {
-      appendUnique(maxPoint);
-      appendUnique(minPoint);
+      visible.add(lastPoint);
     }
-    appendUnique(points[end - 1]);
   }
 
   return WaveformSlice(
@@ -1979,8 +1989,9 @@ class WaveformBuffer implements WaveformHistoryStore {
   }
 
   void _trim() {
-    const maxRetainedPoints = 60000;
-    const compactionThreshold = 12000;
+    // 60 s of 250-Hz ECG ≈ 15 000 points; 60000 was ~4× more than a 20-s window needs.
+    const maxRetainedPoints = 15000;
+    const compactionThreshold = 6000;
     final overflow = activeLength - maxRetainedPoints;
     if (overflow <= 0) {
       if (_startIndex >= compactionThreshold) {
@@ -2057,7 +2068,7 @@ class WaveformBuffer implements WaveformHistoryStore {
     if (needsRangeRebuild) {
       _recomputeRange();
     }
-    if (_startIndex >= 12000) {
+    if (_startIndex >= 6000) {
       _compact();
     }
   }

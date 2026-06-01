@@ -1512,7 +1512,15 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     for (var index = 0; index < length; index++) {
       bytes[index] = (js_util.callMethod(value, 'getUint8', <dynamic>[index]) as num).toInt();
     }
+    // Hard-cap the receive buffer to prevent unbounded growth on a noisy link.
+    // BLE BIO1 frames are at most ~2 KiB; 64 KiB leaves room for 32+ queued frames.
+    const maxReceiveBufferBytes = 65536;
     _receiveBuffer.addAll(bytes);
+    if (_receiveBuffer.length > maxReceiveBufferBytes) {
+      final overflow = _receiveBuffer.length - maxReceiveBufferBytes;
+      // Retain the tail — the oldest bytes are the least useful.
+      _receiveBuffer.removeRange(0, overflow);
+    }
     _drainReceiveBuffer();
   }
 
