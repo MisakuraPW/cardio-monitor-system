@@ -347,12 +347,27 @@ class _Bio1BinaryCodec {
   }) {
     final timestampsUs = <int>[];
     final values = <double>[];
+    var qualitySum = 0.0;
     for (var index = 0; index < sampleCount; index++) {
       final offset = payloadOffset + index * sampleSize;
       timestampsUs.add(_readUint64Le(data, offset));
       values.add(data.getUint16(offset + 8, Endian.little).toDouble());
+      if (sampleSize >= 12) {
+        if (channelKey == 'ecg_filtered') {
+          final flags = data.getUint8(offset + 10);
+          final qualityByte = data.getUint8(offset + 11);
+          qualitySum += flags == 0 ? qualityByte / 100.0 : 0.0;
+        } else {
+          final leadOff = data.getUint8(offset + 10) != 0 ||
+              data.getUint8(offset + 11) != 0;
+          qualitySum += leadOff ? 0.0 : 1.0;
+        }
+      } else {
+        qualitySum += 1.0;
+      }
     }
     final sampleRate = _estimateSampleRate(timestampsUs, 500);
+    final quality = sampleCount == 0 ? 1.0 : qualitySum / sampleCount;
     channels[channelKey] = _channel(
       key: channelKey,
       label: label,
@@ -370,6 +385,7 @@ class _Bio1BinaryCodec {
         sampleRate: sampleRate,
         timestampsUs: timestampsUs,
         samples: values,
+        quality: quality,
         transport: transport,
         frameVersion: frameVersion,
         decodeStatus: decodeStatus,
@@ -586,6 +602,7 @@ class _Bio1BinaryCodec {
     required double sampleRate,
     required List<int> timestampsUs,
     required List<double> samples,
+    double quality = 1.0,
     required String transport,
     required int frameVersion,
     required String decodeStatus,
@@ -601,7 +618,7 @@ class _Bio1BinaryCodec {
       channelKey: channelKey,
       sampleRate: sampleRate,
       unit: unit,
-      quality: 1.0,
+      quality: quality,
       samples: samples,
       sampleTimestampsMs: sampleTimestampsMs,
       transport: transport,
@@ -807,6 +824,8 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     if (config.demoMode) {
       client.subscribe('$_baseTopic/waveform_bin/ecg_filtered', MqttQos.atMostOnce);
       client.subscribe('$_baseTopic/waveform_bin/ppg_filtered', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform_bin/imu', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform_bin/temp', MqttQos.atMostOnce);
     } else {
       client.subscribe('$_baseTopic/catalog', MqttQos.atLeastOnce);
       client.subscribe('$_baseTopic/waveform/+', MqttQos.atMostOnce);
@@ -827,6 +846,10 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
               'ecg_filtered',
               'ppg_ir_filtered',
               'ppg_red_filtered',
+              'imu_ax',
+              'imu_ay',
+              'imu_az',
+              'temp',
             ],
           },
         ),
@@ -1042,7 +1065,9 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
   bool _isDemoRealtimeChannel(String key) =>
       key == 'ecg_filtered' ||
       key == 'ppg_ir_filtered' ||
-      key == 'ppg_red_filtered';
+      key == 'ppg_red_filtered' ||
+      key.startsWith('imu_') ||
+      key == 'temp';
 
   void _mergeBinaryCatalog(List<ChannelDescriptor> incoming) {
     if (incoming.isEmpty) {
@@ -1466,6 +1491,8 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   List<ChannelDescriptor> _currentCatalog = const <ChannelDescriptor>[];
   String _deviceId = 'esp32-bio';
   String _sessionId = 'ble-session';
+  bool _manualDisconnecting = false;
+  int _autoReconnectAttempts = 0;
 
   @override
   Stream<SignalFrame> get streamFrames => _frameController.stream;
@@ -1481,13 +1508,14 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
 
   @override
   Future<void> connect() async {
+    _manualDisconnecting = true;
     await disconnect();
+    _manualDisconnecting = false;
     // Give the ESP32 BLE stack time to fully release the previous connection.
     // Without this, the device may still be cleaning up and reject the new
     // GATT handshake with "NetworkError: GATT Server is disconnected" or
     // "NotSupportedError: GATT operation failed for unknown reason".
     await Future<void>.delayed(const Duration(milliseconds: 800));
-
     _emitStatus(AdapterState.connecting, '正在请求蓝牙设备访问权限...');
 
     final bluetooth = js_util.getProperty(html.window.navigator, 'bluetooth');
@@ -1503,19 +1531,23 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       _device = await js_util.promiseToFuture<dynamic>(
         js_util.callMethod(bluetooth, 'requestDevice', <dynamic>[options]),
       );
+
+      _disconnectCallback = js_util.allowInterop((dynamic _) {
+        if (_manualDisconnecting) {
+          _emitStatus(AdapterState.disconnected, '蓝牙设备已断开');
+          return;
+        }
+        unawaited(_tryAutoReconnect());
+      });
+      js_util.callMethod(
+        _device,
+        'addEventListener',
+        <dynamic>['gattserverdisconnected', _disconnectCallback],
+      );
     } catch (error) {
       _emitStatus(AdapterState.error, '未选择蓝牙设备: $error');
       rethrow;
     }
-
-    _disconnectCallback = js_util.allowInterop((dynamic _) {
-      _emitStatus(AdapterState.disconnected, '蓝牙设备已断开');
-    });
-    js_util.callMethod(
-      _device,
-      'addEventListener',
-      <dynamic>['gattserverdisconnected', _disconnectCallback],
-    );
 
     // ── Phase 2: GATT connect + service discovery (with retries) ────
     const maxAttempts = 3;
@@ -1617,8 +1649,65 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
             .trim();
     _deviceId = deviceName.isEmpty ? config.deviceNamePrefix : deviceName;
     _sessionId = 'ble-${DateTime.now().millisecondsSinceEpoch}';
+    _autoReconnectAttempts = 0;
     _emitStatus(
         AdapterState.streaming, '蓝牙已连接: $_deviceId，等待 BIO1 二进制数据...');
+  }
+
+  Future<void> _tryAutoReconnect() async {
+    if (_device == null || _autoReconnectAttempts >= 2) {
+      _emitStatus(AdapterState.disconnected, '蓝牙设备已断开，请重新连接');
+      return;
+    }
+    _autoReconnectAttempts += 1;
+    _emitStatus(AdapterState.connecting, '蓝牙短暂断开，正在自动重连...');
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    try {
+      final gatt = js_util.getProperty(_device, 'gatt');
+      _server = await js_util.promiseToFuture<dynamic>(
+        js_util.callMethod(gatt, 'connect', const <dynamic>[]),
+      );
+      _service = await js_util.promiseToFuture<dynamic>(
+        js_util.callMethod(
+          _server,
+          'getPrimaryService',
+          <dynamic>[config.serviceUuid],
+        ),
+      );
+      _notifyCharacteristic = await js_util.promiseToFuture<dynamic>(
+        js_util.callMethod(
+          _service,
+          'getCharacteristic',
+          <dynamic>[config.notifyCharacteristicUuid],
+        ),
+      );
+      _controlCharacteristic = await js_util.promiseToFuture<dynamic>(
+        js_util.callMethod(
+          _service,
+          'getCharacteristic',
+          <dynamic>[config.controlCharacteristicUuid],
+        ),
+      );
+      await js_util.promiseToFuture<dynamic>(
+        js_util.callMethod(
+          _notifyCharacteristic,
+          'startNotifications',
+          const <dynamic>[],
+        ),
+      );
+      _notificationCallback ??= js_util.allowInterop((dynamic event) {
+        _handleNotification(event);
+      });
+      js_util.callMethod(
+        _notifyCharacteristic,
+        'addEventListener',
+        <dynamic>['characteristicvaluechanged', _notificationCallback],
+      );
+      _receiveBuffer.clear();
+      _emitStatus(AdapterState.streaming, '蓝牙已自动重连: $_deviceId');
+    } catch (error) {
+      _emitStatus(AdapterState.disconnected, '蓝牙自动重连失败，请手动重连');
+    }
   }
 
   dynamic _buildRequestOptions() {
@@ -1871,6 +1960,9 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       case 'I':
         _handleBinaryImuFrame(data, seq, sampleCount, sampleSize);
         return;
+      case 'T':
+        _handleBinaryTempFrame(data, seq, sampleCount, sampleSize);
+        return;
       default:
         return;
     }
@@ -1884,13 +1976,18 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   ) {
     final timestampsUs = <int>[];
     final values = <double>[];
+    var qualitySum = 0.0;
     for (var index = 0; index < sampleCount; index++) {
       final offset = 11 + index * sampleSize;
       timestampsUs.add(_readUint64Le(data, offset));
       values.add(data.getUint16(offset + 8, Endian.little).toDouble());
+      final leadOff = sampleSize >= 12 &&
+          (data.getUint8(offset + 10) != 0 || data.getUint8(offset + 11) != 0);
+      qualitySum += leadOff ? 0.0 : 1.0;
     }
 
     final sampleRate = _estimateSampleRate(timestampsUs, 500);
+    final quality = sampleCount == 0 ? 1.0 : qualitySum / sampleCount;
     _mergeCatalog(<ChannelDescriptor>[
       _buildChannelDescriptor(
         key: 'ecg',
@@ -1907,6 +2004,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       sampleRate: sampleRate,
       timestampsUs: timestampsUs,
       samples: values,
+      quality: quality,
     );
   }
 
@@ -2044,6 +2142,42 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     }
   }
 
+  void _handleBinaryTempFrame(
+    ByteData data,
+    int seq,
+    int sampleCount,
+    int sampleSize,
+  ) {
+    final timestampsUs = <int>[];
+    final values = <double>[];
+    for (var index = 0; index < sampleCount; index++) {
+      final offset = 11 + index * sampleSize;
+      if (offset + sampleSize > data.lengthInBytes) break;
+      timestampsUs.add(_readUint64Le(data, offset));
+      values.add(data.getFloat32(offset + 10, Endian.little).toDouble());
+    }
+    if (timestampsUs.isEmpty) return;
+
+    final sampleRate = _estimateSampleRate(timestampsUs, 1);
+    _mergeCatalog(<ChannelDescriptor>[
+      _buildChannelDescriptor(
+        key: 'temp',
+        label: '体温',
+        unit: '°C',
+        colorHex: '#E76F51',
+        sampleRate: sampleRate,
+      ),
+    ]);
+    _emitSignalFrame(
+      channelKey: 'temp',
+      seq: seq,
+      unit: '°C',
+      sampleRate: sampleRate,
+      timestampsUs: timestampsUs,
+      samples: values,
+    );
+  }
+
   void _emitSignalFrame({
     required String channelKey,
     required int seq,
@@ -2051,6 +2185,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     required double sampleRate,
     required List<int> timestampsUs,
     required List<double> samples,
+    double quality = 1.0,
   }) {
     final sampleTimestampsMs = timestampsUs
         .map((int timestampUs) => timestampUs ~/ 1000)
@@ -2064,7 +2199,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
         channelKey: channelKey,
         sampleRate: sampleRate,
         unit: unit,
-        quality: 1.0,
+        quality: quality,
         samples: samples,
         sampleTimestampsMs: sampleTimestampsMs,
         transport: 'ble_binary',
@@ -2184,7 +2319,8 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   }
 
   @override
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool silent = false}) async {
+    _manualDisconnecting = true;
     try {
       if (_notifyCharacteristic != null && _notificationCallback != null) {
         js_util.callMethod(
@@ -2234,7 +2370,10 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     _currentCatalog = const <ChannelDescriptor>[];
     _deviceId = config.deviceNamePrefix;
     _sessionId = 'ble-session';
-    _emitStatus(AdapterState.disconnected, '蓝牙连接已关闭');
+    _autoReconnectAttempts = 0;
+    if (!silent) {
+      _emitStatus(AdapterState.disconnected, '蓝牙连接已关闭');
+    }
   }
 
   @override

@@ -52,6 +52,7 @@ uint32_t g_mqttPublishFailCount = 0;
 uint32_t g_lastPublishLatencyMs = 0;
 uint32_t g_ppgPressureDecimateCounter = 0;
 uint32_t g_imuPressureDecimateCounter = 0;
+uint32_t g_demoImuDecimateCounter = 0;
 
 constexpr uint32_t kEcgMqttQueueLen = 1024;
 constexpr uint32_t kPpgMqttQueueLen = 256;
@@ -317,6 +318,7 @@ void resetCounters() {
   g_wifiReconnectCount = 0;
   g_ppgPressureDecimateCounter = 0;
   g_imuPressureDecimateCounter = 0;
+  g_demoImuDecimateCounter = 0;
 }
 
 void handleControlPayload(const char* payload) {
@@ -336,7 +338,11 @@ void handleControlPayload(const char* payload) {
                   textContains(payload, "\"ppg_red\"") ||
                   textContains(payload, "\"ppg_ir_filtered\"") ||
                   textContains(payload, "\"ppg_red_filtered\"");
-    g_enableImu = false;
+    g_enableImu = textContains(payload, "\"imu\"") ||
+                  textContains(payload, "\"imu_ax\"") ||
+                  textContains(payload, "\"imu_ay\"") ||
+                  textContains(payload, "\"imu_az\"") ||
+                  textContains(payload, "\"imu_gx\"");
     g_enableTemp = textContains(payload, "\"temp\"") ||
                    textContains(payload, "\"temperature\"");
     data_logger::logStatus("[NET] MQTT control set_channels.");
@@ -827,7 +833,78 @@ void publishPpgSamples() {
 }
 
 void publishImuSamples() {
-  return;
+  if (g_imuMqttQueue == nullptr) {
+    return;
+  }
+
+  ImuSample batch[kImuBatchMax];
+  const size_t n = dequeueBatch(g_imuMqttQueue, batch, kImuBatchMax);
+  if (n == 0) {
+    return;
+  }
+
+  const uint32_t seq = g_imuSeq++;
+
+  if (kJsonPayloadEnabled) {
+    int16_t valuesAx[kImuBatchMax] = {};
+    int16_t valuesAy[kImuBatchMax] = {};
+    int16_t valuesAz[kImuBatchMax] = {};
+    int16_t valuesGx[kImuBatchMax] = {};
+    int16_t valuesGy[kImuBatchMax] = {};
+    int16_t valuesGz[kImuBatchMax] = {};
+
+    for (size_t i = 0; i < n; ++i) {
+      valuesAx[i] = batch[i].acc_x;
+      valuesAy[i] = batch[i].acc_y;
+      valuesAz[i] = batch[i].acc_z;
+      valuesGx[i] = batch[i].gyr_x;
+      valuesGy[i] = batch[i].gyr_y;
+      valuesGz[i] = batch[i].gyr_z;
+    }
+
+    const uint64_t tsMs = tsUsToMs(batch[0].ts_us);
+    const bool okAx = publishWaveformI16(g_topicWaveImuAx, valuesAx, n, seq, tsMs, BMI_SAMPLE_RATE_HZ, "LSB");
+    const bool okAy = publishWaveformI16(g_topicWaveImuAy, valuesAy, n, seq, tsMs, BMI_SAMPLE_RATE_HZ, "LSB");
+    const bool okAz = publishWaveformI16(g_topicWaveImuAz, valuesAz, n, seq, tsMs, BMI_SAMPLE_RATE_HZ, "LSB");
+    const bool okGx = publishWaveformI16(g_topicWaveImuGx, valuesGx, n, seq, tsMs, BMI_SAMPLE_RATE_HZ, "LSB");
+    const bool okGy = publishWaveformI16(g_topicWaveImuGy, valuesGy, n, seq, tsMs, BMI_SAMPLE_RATE_HZ, "LSB");
+    const bool okGz = publishWaveformI16(g_topicWaveImuGz, valuesGz, n, seq, tsMs, BMI_SAMPLE_RATE_HZ, "LSB");
+    if (!okAx || !okAy || !okAz || !okGx || !okGy || !okGz) {
+      data_logger::logStatus("[NET] MQTT IMU waveform publish failed.");
+    }
+  }
+
+  if (kBinaryPayloadEnabled) {
+    uint8_t payload[kMqttPayloadBuffer] = {};
+    const uint16_t payloadLen = static_cast<uint16_t>(n * 20U);
+    const size_t payloadOffset = beginBio2Frame(payload, sizeof(payload), 'I', seq, static_cast<uint16_t>(n), payloadLen);
+    size_t off = payloadOffset;
+
+    for (size_t i = 0; i < n; ++i) {
+      if (off + 20 > sizeof(payload)) {
+        break;
+      }
+      appendU64Le(&payload[off], batch[i].ts_us);
+      off += 8;
+      appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].acc_x));
+      off += 2;
+      appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].acc_y));
+      off += 2;
+      appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].acc_z));
+      off += 2;
+      appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_x));
+      off += 2;
+      appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_y));
+      off += 2;
+      appendU16Le(&payload[off], static_cast<uint16_t>(batch[i].gyr_z));
+      off += 2;
+    }
+    finishBio2Frame(payload, payloadOffset, off - payloadOffset);
+
+    if (!publishBinaryTracked(g_topicWaveBinImu, payload, off, false)) {
+      data_logger::logStatus("[NET] MQTT IMU BIN publish failed.");
+    }
+  }
 }
 
 void publishTemperatureSamples() {
@@ -1058,8 +1135,53 @@ bool enqueuePpg(const PpgSample& sample) {
 }
 
 bool enqueueImu(const ImuSample& sample) {
-  (void)sample;
-  return true;
+  if (!g_active) {
+    return true;
+  }
+  if (kDemoWifiMode) {
+    ++g_demoImuDecimateCounter;
+    if ((g_demoImuDecimateCounter % 20U) != 0U) {
+      return true;
+    }
+  }
+  if (!g_enableImu) {
+    return true;
+  }
+  if (g_imuMqttQueue == nullptr) {
+    return false;
+  }
+
+  const uint16_t ecgPressure = queueFillPermille(g_ecgMqttQueue, kEcgMqttQueueLen);
+  if (ecgPressure >= kEcgQueueHighPressurePermille) {
+    ++g_dropImu;
+    return false;
+  }
+
+  const uint16_t ppgPressure = queueFillPermille(g_ppgMqttQueue, kPpgMqttQueueLen);
+  if (ppgPressure >= kPpgQueueHighPressurePermille) {
+    ++g_dropImu;
+    return false;
+  }
+
+  const uint16_t imuPressure = queueFillPermille(g_imuMqttQueue, kImuMqttQueueLen);
+  if (imuPressure >= kImuQueueHighPressurePermille) {
+    ++g_imuPressureDecimateCounter;
+    if ((g_imuPressureDecimateCounter % 3U) != 0U) {
+      ++g_dropImu;
+      return false;
+    }
+  }
+
+  bool overwrote = false;
+  if (enqueueDroppingOldest(g_imuMqttQueue, sample, &overwrote)) {
+    if (overwrote) {
+      ++g_overwriteImu;
+      ++g_dropImu;
+    }
+    return true;
+  }
+  ++g_dropImu;
+  return false;
 }
 
 bool enqueueTemperature(const TemperatureSample& sample) {

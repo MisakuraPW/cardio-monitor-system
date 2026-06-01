@@ -294,14 +294,19 @@ class _DashboardPageState extends State<DashboardPage> {
         ),
       );
     }
+    final extraItems = 1 + (_controller.report != null ? 1 : 0);
     return ListView.separated(
-      itemCount: visibleChannels.length + (_controller.report != null ? 1 : 0),
+      itemCount: visibleChannels.length + extraItems,
       separatorBuilder: (_, __) => const SizedBox(height: 8),
       itemBuilder: (BuildContext context, int index) {
-        if (_controller.report != null && index == visibleChannels.length) {
+        if (index == 0) {
+          return _buildRealtimeInfoStrip(context);
+        }
+        final channelIndex = index - 1;
+        if (_controller.report != null && channelIndex == visibleChannels.length) {
           return _ReportCard(report: _controller.report!);
         }
-        final channel = visibleChannels[index];
+        final channel = visibleChannels[channelIndex];
         final waveform = _controller.visibleWaveform(channel.key);
         return _WaveformCard(
           channel: channel,
@@ -310,12 +315,79 @@ class _DashboardPageState extends State<DashboardPage> {
           maxValue: waveform.maxValue,
           gain: _controller.gain,
           secondsPerScreen: _controller.secondsPerScreen,
-          anchorTimestampMs: _controller.currentAnchorTimestampMs,
+          anchorTimestampMs: _controller.anchorTimestampForChannel(channel.key),
           summary: _controller.channelSummary(channel.key),
           runtime: _controller.channelRuntime(channel.key),
           enableHoverInspect: _controller.isPaused,
         );
       },
+    );
+  }
+
+  Widget _buildRealtimeInfoStrip(BuildContext context) {
+    final analysis = _controller.localAnalysis;
+    final physio = analysis.physio;
+    final imu = _controller.imuDisplay;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFD0D8D3).withValues(alpha: 0.55)),
+      ),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: <Widget>[
+          if (_controller.isStartupBuffering)
+            _InfoCard(
+              icon: Icons.hourglass_top,
+              color: const Color(0xFFF4A261),
+              title: '开机缓冲',
+              value: '${(_controller.startupBufferProgress * 100).toStringAsFixed(0)}%',
+              detail: '正在缓存稳定显示窗口',
+            ),
+          _InfoCard(
+            icon: _controller.isEcgWorn ? Icons.check_circle : Icons.error_outline,
+            color: _controller.isEcgWorn ? const Color(0xFF2A9D8F) : const Color(0xFFE63946),
+            title: '佩戴状态检测',
+            value: _controller.isEcgWorn ? '已佩戴' : '未佩戴',
+            detail: _controller.isEcgWorn ? 'ECG 正常显示' : '已暂停 ECG 波形显示',
+          ),
+          _InfoCard(
+            icon: Icons.thermostat,
+            color: const Color(0xFFE76F51),
+            title: '温度',
+            value: '${_controller.displayTemperatureCelsius.toStringAsFixed(1)} °C',
+            detail: _controller.hasTemperatureData ? '来自设备' : '默认演示值',
+          ),
+          _InfoCard(
+            icon: Icons.directions_run,
+            color: const Color(0xFF457B9D),
+            title: 'IMU 运动',
+            value: imu.hasData ? imu.motionLevel.toStringAsFixed(0) : '--',
+            detail: imu.hasData
+                ? 'X ${imu.ax.toStringAsFixed(0)} / Y ${imu.ay.toStringAsFixed(0)} / Z ${imu.az.toStringAsFixed(0)}'
+                : '等待低频 IMU 状态',
+          ),
+          _InfoCard(
+            icon: Icons.analytics_outlined,
+            color: const Color(0xFF0B6E4F),
+            title: '本地摘要',
+            value: '质量 ${(analysis.meanQuality * 100).toStringAsFixed(0)}%',
+            detail: '时长 ${analysis.durationSeconds.toStringAsFixed(1)}s / 通道 ${analysis.activeChannels}',
+          ),
+          if (physio.hrvRmssd != null)
+            _InfoCard(
+              icon: Icons.timeline,
+              color: const Color(0xFF6D597A),
+              title: 'HRV',
+              value: '${physio.hrvRmssd!.toStringAsFixed(1)} ms',
+              detail: 'RMSSD',
+            ),
+        ],
+      ),
     );
   }
 
@@ -1297,6 +1369,52 @@ class _VitalChip extends StatelessWidget {
           Text(value, style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700, color: color)),
           const SizedBox(width: 2),
           Text(unit, style: TextStyle(fontSize: 10, color: color.withValues(alpha: 0.7))),
+        ],
+      ),
+    );
+  }
+}
+
+class _InfoCard extends StatelessWidget {
+  const _InfoCard({
+    required this.icon,
+    required this.color,
+    required this.title,
+    required this.value,
+    required this.detail,
+  });
+
+  final IconData icon;
+  final Color color;
+  final String title;
+  final String value;
+  final String detail;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 150),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.07),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 18, color: color),
+          const SizedBox(width: 8),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(title, style: TextStyle(fontSize: 11, color: color.withValues(alpha: 0.78))),
+              const SizedBox(height: 2),
+              Text(value, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: color)),
+              Text(detail, style: TextStyle(fontSize: 10, color: color.withValues(alpha: 0.58))),
+            ],
+          ),
         ],
       ),
     );

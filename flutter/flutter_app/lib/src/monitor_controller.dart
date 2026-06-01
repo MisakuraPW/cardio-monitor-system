@@ -64,6 +64,12 @@ class MonitorController extends ChangeNotifier {
       <String, WaveformBufferSnapshot>{};
   List<ChannelDescriptor> _channelCatalog = <ChannelDescriptor>[];
   String _lastCatalogSignature = '';
+  final Map<String, int> _lastDisplayTimestampMsByChannel = <String, int>{};
+  final Map<String, int> _lastAcceptedSeqByChannel = <String, int>{};
+  final Map<String, double> _latestImuValues = <String, double>{};
+  int _latestImuReceivedAtMs = 0;
+  double? _latestTemperatureCelsius;
+  bool? _latestEcgLeadOn;
 
   AdapterStatus status = AdapterStatus(
     state: AdapterState.idle,
@@ -84,6 +90,7 @@ class MonitorController extends ChangeNotifier {
   double historyOffsetSeconds = 0;
   double gain = 1;
   double liveDisplayLagSeconds = 2;
+  double startupBufferSeconds = 15;
 
   String cloudBaseUrl = 'http://182.254.220.56:8000';
   String userName = '演示用户';
@@ -108,6 +115,23 @@ class MonitorController extends ChangeNotifier {
   bool get isConnected =>
       status.state == AdapterState.connected || status.state == AdapterState.streaming;
   bool get canRollbackHistory => isPaused && maxHistoryOffsetSeconds > 0.05;
+  bool get isStartupBuffering =>
+      isConnected &&
+      !isPaused &&
+      mode != DataSourceMode.file &&
+      _liveVisibleBufferDurationSeconds() < startupBufferSeconds;
+  double get startupBufferProgress => startupBufferSeconds <= 0
+      ? 1
+      : (_liveVisibleBufferDurationSeconds() / startupBufferSeconds).clamp(0.0, 1.0);
+  bool get isEcgWorn => _latestEcgLeadOn ?? true;
+  double get displayTemperatureCelsius =>
+      _latestTemperatureCelsius ?? localAnalysis.physio.temperatureCelsius ?? 36.7;
+  bool get hasTemperatureData =>
+      _latestTemperatureCelsius != null || localAnalysis.physio.temperatureCelsius != null;
+  ImuDisplaySnapshot get imuDisplay => ImuDisplaySnapshot.fromValues(
+        values: _latestImuValues,
+        receivedAtMs: _latestImuReceivedAtMs,
+      );
 
   int get currentAnchorTimestampMs {
     final liveBase = _liveAnchorTimestampMs();
@@ -229,6 +253,12 @@ class MonitorController extends ChangeNotifier {
 
     _buffers.clear();
     _runtimeStats.clear();
+    _lastDisplayTimestampMsByChannel.clear();
+    _lastAcceptedSeqByChannel.clear();
+    _latestImuValues.clear();
+    _latestImuReceivedAtMs = 0;
+    _latestTemperatureCelsius = null;
+    _latestEcgLeadOn = null;
     _pausedSnapshots = <String, WaveformBufferSnapshot>{};
     _lastCatalogSignature = '';
     report = null;
@@ -369,15 +399,23 @@ class MonitorController extends ChangeNotifier {
   }
 
   WaveformSlice visibleWaveform(String channelKey) {
+    if (!isPaused && isStartupBuffering) {
+      return WaveformSlice.empty;
+    }
+    if (_isEcgChannel(channelKey) && !isEcgWorn) {
+      return WaveformSlice.empty;
+    }
     final store = _waveformStoreFor(channelKey);
     if (store == null) {
       return WaveformSlice.empty;
     }
     return store.visibleWaveform(
-      anchorMs: currentAnchorTimestampMs,
+      anchorMs: _anchorTimestampForChannel(channelKey),
       windowMs: (secondsPerScreen * 1000).round(),
     );
   }
+
+  int anchorTimestampForChannel(String channelKey) => _anchorTimestampForChannel(channelKey);
 
   List<SamplePoint> visiblePoints(String channelKey) {
     return visibleWaveform(channelKey).points;
@@ -491,6 +529,27 @@ class MonitorController extends ChangeNotifier {
   }
 
   void _onFrame(SignalFrame frame) {
+    final normalizedFrame = _normalizeFrameForLiveDisplay(frame);
+    if (normalizedFrame == null) {
+      return;
+    }
+    frame = normalizedFrame;
+
+    if (_isImuChannel(frame.channelKey)) {
+      _observeImuFrame(frame);
+    }
+    if (frame.channelKey == 'temp') {
+      _observeTemperatureFrame(frame);
+    }
+    if (_isEcgChannel(frame.channelKey)) {
+      _latestEcgLeadOn = frame.quality > 0.15;
+      if (!isEcgWorn) {
+        _buffers.remove(frame.channelKey);
+        _markFrameDirty();
+        return;
+      }
+    }
+
     final knownIndex = _channelCatalog.indexWhere(
       (ChannelDescriptor item) => item.key == frame.channelKey,
     );
@@ -657,19 +716,24 @@ class MonitorController extends ChangeNotifier {
       unit: frame.unit,
       sampleRate: frame.sampleRate,
       colorHex: '#247BA0',
-      enabled: _isDefaultVisibleChannel(frame.channelKey),
+      enabled: _isDefaultVisibleChannel(frame.channelKey) &&
+          !_isStatusOnlyChannel(frame.channelKey),
     );
     _setCatalog(<ChannelDescriptor>[..._channelCatalog, inferred]);
   }
 
   ChannelDescriptor _withDemoDefaults(ChannelDescriptor channel) {
-    if (_isDefaultVisibleChannel(channel.key)) {
-      return channel.enabled ? channel : channel.copyWith(enabled: true);
+    final normalizedRate = _nominalDisplaySampleRate(channel.key, channel.sampleRate);
+    final normalized = normalizedRate != channel.sampleRate
+        ? channel.copyWith(sampleRate: normalizedRate)
+        : channel;
+    if (_isDefaultVisibleChannel(normalized.key)) {
+      return normalized.enabled ? normalized : normalized.copyWith(enabled: true);
     }
-    if (_isImuChannel(channel.key) && channel.enabled) {
-      return channel.copyWith(enabled: false);
+    if (_isStatusOnlyChannel(normalized.key) && normalized.enabled) {
+      return normalized.copyWith(enabled: false);
     }
-    return channel;
+    return normalized;
   }
 
   bool _isDefaultVisibleChannel(String key) =>
@@ -677,7 +741,11 @@ class MonitorController extends ChangeNotifier {
       key == 'ppg_ir_filtered' ||
       key == 'ppg_red_filtered';
 
+  bool _isEcgChannel(String key) => key == 'ecg' || key == 'ecg_filtered';
+
   bool _isImuChannel(String key) => key.startsWith('imu_') || key == 'imu';
+
+  bool _isStatusOnlyChannel(String key) => _isImuChannel(key) || key == 'temp';
 
   String _catalogSignature(List<ChannelDescriptor> channels) {
     final stable = List<ChannelDescriptor>.from(channels)
@@ -705,6 +773,166 @@ class MonitorController extends ChangeNotifier {
     }
     final stepMs = frame.sampleRate <= 0 ? 1 : (1000 / frame.sampleRate).round();
     return frame.timestampMs + stepMs * (frame.samples.length - 1);
+  }
+
+  SignalFrame? _normalizeFrameForLiveDisplay(SignalFrame frame) {
+    if (frame.samples.isEmpty) {
+      return null;
+    }
+
+    final previousDisplayTimestamp = _lastDisplayTimestampMsByChannel[frame.channelKey];
+    final lastSeq = _lastAcceptedSeqByChannel[frame.channelKey];
+    final incomingLatest = _latestFrameTimestampMs(frame);
+    if (lastSeq != null &&
+        frame.seq <= lastSeq &&
+        previousDisplayTimestamp != null &&
+        incomingLatest <= previousDisplayTimestamp) {
+      return null;
+    }
+
+    final displayRate = _nominalDisplaySampleRate(frame.channelKey, frame.sampleRate);
+    final stepMs = math.max(1, (1000 / displayRate).round());
+    final incomingTimestamps = frame.sampleTimestampsMs;
+    final trustIncoming = _canTrustFrameTimestamps(
+      frame: frame,
+      nominalRate: displayRate,
+      previousTimestampMs: previousDisplayTimestamp,
+    );
+
+    final normalizedTimestamps = <int>[];
+    if (trustIncoming && incomingTimestamps != null) {
+      normalizedTimestamps.addAll(incomingTimestamps);
+    } else {
+      final startTimestamp = previousDisplayTimestamp == null
+          ? (frame.receivedAtMs > 0 ? frame.receivedAtMs : frame.timestampMs)
+          : previousDisplayTimestamp + stepMs;
+      for (var index = 0; index < frame.samples.length; index++) {
+        normalizedTimestamps.add(startTimestamp + stepMs * index);
+      }
+    }
+
+    _lastDisplayTimestampMsByChannel[frame.channelKey] = normalizedTimestamps.last;
+    _lastAcceptedSeqByChannel[frame.channelKey] = frame.seq;
+    if (trustIncoming && displayRate == frame.sampleRate) {
+      return frame;
+    }
+
+    return SignalFrame(
+      deviceId: frame.deviceId,
+      sessionId: frame.sessionId,
+      seq: frame.seq,
+      timestampMs: normalizedTimestamps.first,
+      channelKey: frame.channelKey,
+      sampleRate: displayRate,
+      unit: frame.unit,
+      quality: frame.quality,
+      samples: frame.samples,
+      sampleTimestampsMs: normalizedTimestamps,
+      transport: frame.transport,
+      receivedAtMs: frame.receivedAtMs,
+      sourceSeq: frame.sourceSeq,
+      frameVersion: frame.frameVersion,
+      decodeStatus: frame.decodeStatus,
+    );
+  }
+
+  bool _canTrustFrameTimestamps({
+    required SignalFrame frame,
+    required double nominalRate,
+    required int? previousTimestampMs,
+  }) {
+    final timestamps = frame.sampleTimestampsMs;
+    if (frame.transport.startsWith('ble_')) {
+      return false;
+    }
+    if (timestamps == null || timestamps.length != frame.samples.length || timestamps.isEmpty) {
+      return false;
+    }
+    if (previousTimestampMs != null) {
+      final firstGapMs = timestamps.first - previousTimestampMs;
+      final expectedStepMs = math.max(1, (1000 / nominalRate).round());
+      if (firstGapMs <= 0 || firstGapMs > math.max(1000, expectedStepMs * frame.samples.length * 4)) {
+        return false;
+      }
+    }
+    var positiveDeltaCount = 0;
+    var totalDelta = 0;
+    for (var index = 1; index < timestamps.length; index++) {
+      final delta = timestamps[index] - timestamps[index - 1];
+      if (delta <= 0) {
+        return false;
+      }
+      totalDelta += delta;
+      positiveDeltaCount += 1;
+    }
+    if (positiveDeltaCount == 0) {
+      return true;
+    }
+    final observedRate = 1000.0 / (totalDelta / positiveDeltaCount);
+    return observedRate >= nominalRate * 0.65 && observedRate <= nominalRate * 1.35;
+  }
+
+  double _nominalDisplaySampleRate(String channelKey, double fallback) {
+    if (channelKey.startsWith('ecg')) {
+      return 500;
+    }
+    if (channelKey.startsWith('ppg')) {
+      return 200;
+    }
+    return fallback > 0 ? fallback : 100;
+  }
+
+  int _anchorTimestampForChannel(String channelKey) {
+    if (isPaused) {
+      return currentAnchorTimestampMs;
+    }
+    final store = _waveformStoreFor(channelKey);
+    if (store != null && store.hasPoints) {
+      final lagSeconds = _effectiveLiveDisplayLagSeconds(store);
+      return store.latestPointTimestampMs - (lagSeconds * 1000).round();
+    }
+    return currentAnchorTimestampMs;
+  }
+
+  double _effectiveLiveDisplayLagSeconds(WaveformHistoryStore store) {
+    final durationSeconds =
+        (store.latestPointTimestampMs - store.oldestTimestampMs) / 1000.0;
+    final bufferedLag = math.max(0.0, durationSeconds - secondsPerScreen);
+    return math.max(liveDisplayLagSeconds, math.min(startupBufferSeconds, bufferedLag));
+  }
+
+  double _liveVisibleBufferDurationSeconds() {
+    var longest = 0.0;
+    for (final ChannelDescriptor descriptor in visibleChannels) {
+      final store = _buffers[descriptor.key];
+      if (store == null || !store.hasPoints) {
+        continue;
+      }
+      final duration =
+          (store.latestPointTimestampMs - store.oldestTimestampMs) / 1000.0;
+      longest = math.max(longest, duration);
+    }
+    return longest;
+  }
+
+  void _observeImuFrame(SignalFrame frame) {
+    if (frame.samples.isEmpty) {
+      return;
+    }
+    _latestImuValues[frame.channelKey] = frame.samples.last;
+    _latestImuReceivedAtMs = frame.receivedAtMs > 0
+        ? frame.receivedAtMs
+        : DateTime.now().millisecondsSinceEpoch;
+  }
+
+  void _observeTemperatureFrame(SignalFrame frame) {
+    if (frame.samples.isEmpty) {
+      return;
+    }
+    final value = frame.samples.last;
+    if (value > 20 && value < 45) {
+      _latestTemperatureCelsius = value;
+    }
   }
 
   Map<String, dynamic> _buildSummaryPayload() {
@@ -1259,6 +1487,52 @@ class MonitorController extends ChangeNotifier {
     cloudApi.dispose();
     super.dispose();
   }
+}
+
+class ImuDisplaySnapshot {
+  const ImuDisplaySnapshot({
+    required this.ax,
+    required this.ay,
+    required this.az,
+    required this.gx,
+    required this.gy,
+    required this.gz,
+    required this.motionLevel,
+    required this.receivedAtMs,
+  });
+
+  factory ImuDisplaySnapshot.fromValues({
+    required Map<String, double> values,
+    required int receivedAtMs,
+  }) {
+    final ax = values['imu_ax'] ?? 0;
+    final ay = values['imu_ay'] ?? 0;
+    final az = values['imu_az'] ?? 0;
+    final gx = values['imu_gx'] ?? 0;
+    final gy = values['imu_gy'] ?? 0;
+    final gz = values['imu_gz'] ?? 0;
+    return ImuDisplaySnapshot(
+      ax: ax,
+      ay: ay,
+      az: az,
+      gx: gx,
+      gy: gy,
+      gz: gz,
+      motionLevel: math.sqrt(ax * ax + ay * ay + az * az),
+      receivedAtMs: receivedAtMs,
+    );
+  }
+
+  final double ax;
+  final double ay;
+  final double az;
+  final double gx;
+  final double gy;
+  final double gz;
+  final double motionLevel;
+  final int receivedAtMs;
+
+  bool get hasData => receivedAtMs > 0;
 }
 
 class AutoSegmentUploader {
