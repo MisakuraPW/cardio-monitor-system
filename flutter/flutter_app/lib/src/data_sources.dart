@@ -1418,7 +1418,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
 
     final bluetooth = js_util.getProperty(html.window.navigator, 'bluetooth');
     if (bluetooth == null) {
-      _emitStatus(AdapterState.error, '当前浏览器不支持 Web Bluetooth');
+      _emitStatus(AdapterState.error, '当前浏览器不支持 Web Bluetooth，请使用 Chrome/Edge 并通过 HTTPS 或 localhost 打开网页');
       throw Exception('Web Bluetooth is not available.');
     }
 
@@ -1548,22 +1548,14 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   }
 
   dynamic _buildRequestOptions() {
-    final prefix = config.deviceNamePrefix.trim();
-    // Always list the service as optional so we can access it after connecting,
-    // but do NOT require it in the advertisement filter — many ESP32 firmwares
-    // don't include the custom UUID in the BLE advertisement payload.
+    // Use the broad picker by default. ESP32/NimBLE devices are often visible
+    // to phone Bluetooth settings while Chrome cannot match them through
+    // strict name/service filters because the name or 128-bit UUID may only be
+    // present in scan response data, or may differ in case after reflashing.
     final options = <String, dynamic>{
+      'acceptAllDevices': true,
       'optionalServices': <String>[config.serviceUuid],
     };
-    if (prefix.isNotEmpty) {
-      options['filters'] = <Map<String, dynamic>>[
-        <String, dynamic>{
-          'namePrefix': prefix,
-        },
-      ];
-    } else {
-      options['acceptAllDevices'] = true;
-    }
     return js_util.jsify(options);
   }
 
