@@ -14,10 +14,18 @@ class CloudApiService {
   String baseUrl;
 
   Uri _uri(String path) {
-    final sanitized = baseUrl.endsWith('/')
-        ? baseUrl.substring(0, baseUrl.length - 1)
-        : baseUrl;
+    final normalized = normalizeCloudApiBaseUrl(baseUrl);
+    final sanitized = normalized.endsWith('/')
+        ? normalized.substring(0, normalized.length - 1)
+        : normalized;
     return Uri.parse('$sanitized$path');
+  }
+
+  Future<SessionRecord> getSession(String sessionId) async {
+    final response = await _client.get(_uri('/api/v1/sessions/$sessionId'));
+    _ensureOk(response);
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    return SessionRecord.fromJson(decoded['session'] as Map<String, dynamic>);
   }
 
   Future<SessionRecord> createSession(SessionRecord session) async {
@@ -128,4 +136,17 @@ class CloudApiService {
       'Cloud API request failed: ${response.statusCode} ${response.body}',
     );
   }
+}
+
+String normalizeCloudApiBaseUrl(String value) {
+  final trimmed = value.trim();
+  final candidate = trimmed.isEmpty ? 'http://182.254.220.56:8000' : trimmed;
+  final uri = Uri.tryParse(candidate);
+  if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+    return candidate;
+  }
+  if (uri.port == 8080) {
+    return uri.replace(port: 8000).toString();
+  }
+  return candidate.endsWith('/') ? candidate.substring(0, candidate.length - 1) : candidate;
 }

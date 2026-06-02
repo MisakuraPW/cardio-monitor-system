@@ -126,13 +126,13 @@ class MonitorController extends ChangeNotifier {
       isConnected &&
       !isPaused &&
       mode != DataSourceMode.file &&
-      !_hasAnyInitialChannelReady();
+      !_hasInitialVisibleBufferReady();
   double get startupBufferProgress => _initialBufferProgress();
   double get _requiredLiveBufferSeconds => _initialBufferTargetSeconds;
   double get _targetPlaybackLagSeconds =>
       math.max(liveDisplayLagSeconds, _initialBufferTargetSeconds - secondsPerScreen);
   int get _liveRetentionMs =>
-      (math.max(30.0, _requiredLiveBufferSeconds + 10.0) * 1000).round();
+      (math.max(120.0, _requiredLiveBufferSeconds + secondsPerScreen + 30.0) * 1000).round();
   bool get isEcgWorn => _latestEcgLeadOn ?? true;
   double get displayTemperatureCelsius =>
       _latestTemperatureCelsius ?? localAnalysis.physio.temperatureCelsius ?? 36.7;
@@ -226,7 +226,7 @@ class MonitorController extends ChangeNotifier {
   }
 
   void updateCloudBaseUrl(String value) {
-    cloudBaseUrl = value.trim();
+    cloudBaseUrl = normalizeCloudApiBaseUrl(value);
     cloudApi.baseUrl = cloudBaseUrl;
     _scheduleNotify();
   }
@@ -412,6 +412,9 @@ class MonitorController extends ChangeNotifier {
   }
 
   WaveformSlice visibleWaveform(String channelKey) {
+    if (!isPaused && mode != DataSourceMode.file && isStartupBuffering) {
+      return WaveformSlice.empty;
+    }
     if (!isPaused && _shouldHoldChannelForInitialFill(channelKey)) {
       return WaveformSlice.empty;
     }
@@ -455,13 +458,9 @@ class MonitorController extends ChangeNotifier {
     }
 
     try {
-      cloudApi.baseUrl = cloudBaseUrl;
       _pushEvent('开始上传监测摘要到云端');
 
-      final cloudSession = localSession.id.startsWith('session-')
-          ? localSession
-          : await cloudApi.createSession(localSession);
-      session = cloudSession;
+      final cloudSession = await _ensureCloudSession();
 
       final summary = _buildSummaryPayload();
       final excerpts = _buildExcerptPayload();
@@ -506,10 +505,10 @@ class MonitorController extends ChangeNotifier {
       return;
     }
     try {
-      cloudApi.baseUrl = cloudBaseUrl;
       _pushEvent('开始分析最近分段 #${segment.segmentIndex}');
+      final cloudSession = await _ensureCloudSession();
       report = await cloudApi.analyzeSegment(
-        sessionId: localSession.id,
+        sessionId: cloudSession.id,
         segmentId: segment.id,
       );
       _pushEvent('最近分段报告已回传');
@@ -604,15 +603,49 @@ class MonitorController extends ChangeNotifier {
     _scheduleNotify();
   }
 
+  void _prepareCloudApi() {
+    final normalized = normalizeCloudApiBaseUrl(cloudBaseUrl);
+    cloudBaseUrl = normalized;
+    cloudApi.baseUrl = normalized;
+  }
+
+  Future<SessionRecord> _ensureCloudSession({bool forceCreate = false}) async {
+    final current = session;
+    if (current == null) {
+      throw StateError('当前没有监测会话');
+    }
+    _prepareCloudApi();
+
+    if (!forceCreate && current.id.startsWith('session-')) {
+      try {
+        final remoteSession = await cloudApi.getSession(current.id);
+        session = remoteSession;
+        return remoteSession;
+      } catch (error) {
+        if (!_looksLikeMissingCloudSession(error)) {
+          rethrow;
+        }
+        _pushEvent('当前云端会话已不存在，将重新创建');
+      }
+    }
+
+    final cloudSession = await cloudApi.createSession(current);
+    session = cloudSession;
+    return cloudSession;
+  }
+
+  bool _looksLikeMissingCloudSession(Object error) {
+    final text = error.toString();
+    return text.contains('404') || text.contains('Session not found');
+  }
+
   Future<void> _openCloudSessionForAutoUpload() async {
     final localSession = session;
     if (localSession == null) {
       return;
     }
     try {
-      cloudApi.baseUrl = cloudBaseUrl;
-      final cloudSession = await cloudApi.createSession(localSession);
-      session = cloudSession;
+      final cloudSession = await _ensureCloudSession();
       _segmentUploader.start(cloudSession);
       _pushEvent('自动分段上传已开启: ${cloudSession.userName}');
     } catch (error) {
@@ -621,11 +654,33 @@ class MonitorController extends ChangeNotifier {
     }
   }
 
-  Future<SegmentRecord> _uploadSegmentPayload(SegmentUploadPayload payload) {
-    cloudApi.baseUrl = cloudBaseUrl;
+  Future<SegmentRecord> _uploadSegmentPayload(SegmentUploadPayload payload) async {
+    _prepareCloudApi();
     pendingSegmentUploadCount = _segmentUploader.pendingCount;
     _scheduleNotify();
-    return cloudApi.uploadSegment(payload);
+    try {
+      return await cloudApi.uploadSegment(payload);
+    } catch (error) {
+      if (!_looksLikeMissingCloudSession(error)) {
+        rethrow;
+      }
+      _pushEvent('云端会话不存在，正在重新创建并补传分段');
+      final cloudSession = await _ensureCloudSession(forceCreate: true);
+      final retargeted = SegmentUploadPayload(
+        sessionId: cloudSession.id,
+        deviceId: cloudSession.deviceId,
+        userId: cloudSession.userId,
+        userName: cloudSession.userName,
+        segmentIndex: payload.segmentIndex,
+        startTimestampMs: payload.startTimestampMs,
+        endTimestampMs: payload.endTimestampMs,
+        channels: payload.channels,
+        metrics: payload.metrics,
+        channelSummaries: payload.channelSummaries,
+        metadata: payload.metadata,
+      );
+      return cloudApi.uploadSegment(retargeted);
+    }
   }
 
   void _onSegmentUploaded(SegmentRecord segment) {
@@ -674,8 +729,15 @@ class MonitorController extends ChangeNotifier {
     if (timestampMs <= 0 || isPaused) {
       return;
     }
+    final currentWindowStartMs = _displayAnchorMs > 0
+        ? _displayAnchorMs - (secondsPerScreen * 1000).round() - 3000
+        : timestampMs;
+    final safeTimestampMs = math.min(timestampMs, currentWindowStartMs);
+    if (safeTimestampMs <= 0) {
+      return;
+    }
     for (final WaveformBuffer buffer in _buffers.values) {
-      buffer.trimBefore(timestampMs);
+      buffer.trimBefore(safeTimestampMs);
     }
   }
 
@@ -870,23 +932,28 @@ class MonitorController extends ChangeNotifier {
     return currentAnchorTimestampMs;
   }
 
-  bool _hasAnyInitialChannelReady() {
-    for (final ChannelDescriptor descriptor in visibleChannels) {
+  Iterable<ChannelDescriptor> get _visibleWaveformChannels =>
+      visibleChannels.where((ChannelDescriptor item) => !_isStatusOnlyChannel(item.key));
+
+  bool _hasInitialVisibleBufferReady() {
+    var hasCandidate = false;
+    for (final ChannelDescriptor descriptor in _visibleWaveformChannels) {
+      hasCandidate = true;
       final buffer = _buffers[descriptor.key];
       if (buffer == null || !buffer.hasPoints) {
-        continue;
+        return false;
       }
-      if (_initiallyFilledChannels.contains(descriptor.key) ||
-          buffer.activeLength >= _initialSampleThreshold(descriptor)) {
-        return true;
+      if (!_initiallyFilledChannels.contains(descriptor.key) &&
+          buffer.activeLength < _initialSampleThreshold(descriptor)) {
+        return false;
       }
     }
-    return false;
+    return hasCandidate;
   }
 
   int _oldestReadyVisibleTimestampMs() {
     var oldest = 0;
-    for (final ChannelDescriptor descriptor in visibleChannels) {
+    for (final ChannelDescriptor descriptor in _visibleWaveformChannels) {
       final buffer = _buffers[descriptor.key];
       if (buffer == null || !buffer.hasPoints) {
         continue;
@@ -898,6 +965,22 @@ class MonitorController extends ChangeNotifier {
       oldest = oldest == 0 ? buffer.oldestTimestampMs : math.min(oldest, buffer.oldestTimestampMs);
     }
     return oldest;
+  }
+
+  int _latestReadyVisibleTimestampMs() {
+    var latest = 0;
+    for (final ChannelDescriptor descriptor in _visibleWaveformChannels) {
+      final buffer = _buffers[descriptor.key];
+      if (buffer == null || !buffer.hasPoints) {
+        continue;
+      }
+      if (!_initiallyFilledChannels.contains(descriptor.key) &&
+          buffer.activeLength < _initialSampleThreshold(descriptor)) {
+        continue;
+      }
+      latest = latest == 0 ? buffer.latestPointTimestampMs : math.min(latest, buffer.latestPointTimestampMs);
+    }
+    return latest;
   }
 
   bool _shouldHoldChannelForInitialFill(String channelKey) {
@@ -916,20 +999,22 @@ class MonitorController extends ChangeNotifier {
   }
 
   double _initialBufferProgress() {
-    var best = 0.0;
-    for (final ChannelDescriptor descriptor in visibleChannels) {
+    var progress = 1.0;
+    var hasCandidate = false;
+    for (final ChannelDescriptor descriptor in _visibleWaveformChannels) {
+      hasCandidate = true;
       final buffer = _buffers[descriptor.key];
       if (buffer == null || !buffer.hasPoints) {
+        progress = 0;
         continue;
       }
       final required = _initialSampleThreshold(descriptor);
       if (required <= 0) {
-        best = 1;
         continue;
       }
-      best = math.max(best, buffer.activeLength / required);
+      progress = math.min(progress, buffer.activeLength / required);
     }
-    return best.clamp(0.0, 1.0).toDouble();
+    return hasCandidate ? progress.clamp(0.0, 1.0).toDouble() : 0.0;
   }
 
   int _initialSampleThresholdForChannel(String channelKey) {
@@ -1352,14 +1437,19 @@ class MonitorController extends ChangeNotifier {
 
   int _liveAnchorTimestampMs() {
     final nowMs = DateTime.now().millisecondsSinceEpoch;
-    if (latestTimestampMs == 0) {
+    final synchronizedLatestMs = _latestReadyVisibleTimestampMs();
+    final liveLatestMs = synchronizedLatestMs > 0 ? synchronizedLatestMs : latestTimestampMs;
+    if (liveLatestMs == 0) {
       return nowMs;
+    }
+    if (mode != DataSourceMode.file && !_hasInitialVisibleBufferReady()) {
+      return liveLatestMs;
     }
 
     if (_displayAnchorMs == 0) {
       _livePlaybackStartAnchorMs = _oldestReadyVisibleTimestampMs();
       _displayAnchorMs = _livePlaybackStartAnchorMs == 0
-          ? latestTimestampMs - (_targetPlaybackLagSeconds * 1000).round()
+          ? liveLatestMs - (_targetPlaybackLagSeconds * 1000).round()
           : _livePlaybackStartAnchorMs;
       _lastAnchorWallMs = nowMs;
       return _displayAnchorMs;
@@ -1369,8 +1459,8 @@ class MonitorController extends ChangeNotifier {
     final elapsedMs = rawElapsedMs < 0 ? 0 : math.min(250, rawElapsedMs);
     _lastAnchorWallMs = nowMs;
 
-    final targetAnchor = latestTimestampMs - (_targetPlaybackLagSeconds * 1000).round();
-    final maxAnchor = latestTimestampMs - 120;
+    final targetAnchor = liveLatestMs - (_targetPlaybackLagSeconds * 1000).round();
+    final maxAnchor = liveLatestMs - 120;
     var next = _displayAnchorMs;
     final fillUntil = _livePlaybackStartAnchorMs == 0
         ? 0
@@ -1382,10 +1472,16 @@ class MonitorController extends ChangeNotifier {
     } else {
       next += elapsedMs;
     }
+    if (maxAnchor <= _displayAnchorMs) {
+      // If transport/UI stalls consume the buffer, keep the current anchor.
+      // Moving the anchor backwards makes the waveform vanish and restart
+      // from the right edge, which is exactly the jump we want to avoid.
+      return _displayAnchorMs;
+    }
     if (next > maxAnchor) {
       next = maxAnchor;
     }
-    if (next < _displayAnchorMs && maxAnchor >= _displayAnchorMs) {
+    if (next < _displayAnchorMs) {
       next = _displayAnchorMs;
     }
     _displayAnchorMs = next;
@@ -1438,7 +1534,7 @@ class MonitorController extends ChangeNotifier {
     _scheduleNotify();
 
     try {
-      cloudApi.baseUrl = cloudBaseUrl;
+      _prepareCloudApi();
       final agentReport = await cloudApi.analyzeSegment(
         sessionId: localSession.id,
         segmentId: segment.id,

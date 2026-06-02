@@ -3,6 +3,7 @@
 import csv
 import json
 from io import StringIO
+from urllib.parse import quote
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -463,11 +464,18 @@ def download_session_segment_csv(session_id: str, segment_id: str) -> StreamingR
         segment = storage.get_segment_detail(session_id, segment_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail='Segment not found') from exc
-    filename = f'{segment.userName}_segment_{segment.segmentIndex}.csv'.replace(' ', '_')
+    safe_filename = f'segment_{segment.segmentIndex}.csv'
+    display_filename = f'{segment.userName}_segment_{segment.segmentIndex}.csv'.replace(' ', '_')
+    encoded_filename = quote(display_filename)
     return StreamingResponse(
         iter([_segment_to_csv(segment)]),
         media_type='text/csv; charset=utf-8',
-        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+        headers={
+            'Content-Disposition': (
+                f'attachment; filename="{safe_filename}"; '
+                f"filename*=UTF-8''{encoded_filename}"
+            )
+        },
     )
 
 
