@@ -90,6 +90,7 @@ class MonitorController extends ChangeNotifier {
   int latestTimestampMs = 0;
   int _displayAnchorMs = 0;
   int _lastAnchorWallMs = 0;
+  int _livePlaybackStartAnchorMs = 0;
   int? _pauseReferenceTimestampMs;
   bool isPaused = false;
   double secondsPerScreen = 6;
@@ -277,6 +278,7 @@ class MonitorController extends ChangeNotifier {
     latestTimestampMs = 0;
     _displayAnchorMs = 0;
     _lastAnchorWallMs = 0;
+    _livePlaybackStartAnchorMs = 0;
     isPaused = false;
     historyOffsetSeconds = 0;
     _pauseReferenceTimestampMs = null;
@@ -738,7 +740,7 @@ class MonitorController extends ChangeNotifier {
   }
 
   ChannelDescriptor _withDemoDefaults(ChannelDescriptor channel) {
-    final normalizedRate = _nominalDisplaySampleRate(channel.key, channel.sampleRate);
+    final normalizedRate = _displaySampleRate(channel.key, channel.sampleRate);
     final normalized = normalizedRate != channel.sampleRate
         ? channel.copyWith(sampleRate: normalizedRate)
         : channel;
@@ -805,7 +807,7 @@ class MonitorController extends ChangeNotifier {
       return null;
     }
 
-    final displayRate = _nominalDisplaySampleRate(frame.channelKey, frame.sampleRate);
+    final displayRate = _displaySampleRate(frame.channelKey, frame.sampleRate);
     final stepMs = math.max(1, (1000 / displayRate).round());
     final normalizedTimestamps = <int>[];
     final startTimestamp = previousDisplayTimestamp == null
@@ -847,6 +849,13 @@ class MonitorController extends ChangeNotifier {
     return fallback > 0 ? fallback : 100;
   }
 
+  double _displaySampleRate(String channelKey, double fallback) {
+    if (mode == DataSourceMode.file) {
+      return fallback > 0 ? fallback : 100;
+    }
+    return _nominalDisplaySampleRate(channelKey, fallback);
+  }
+
   int _anchorTimestampForChannel(String channelKey) {
     if (isPaused) {
       return currentAnchorTimestampMs;
@@ -873,6 +882,22 @@ class MonitorController extends ChangeNotifier {
       }
     }
     return false;
+  }
+
+  int _oldestReadyVisibleTimestampMs() {
+    var oldest = 0;
+    for (final ChannelDescriptor descriptor in visibleChannels) {
+      final buffer = _buffers[descriptor.key];
+      if (buffer == null || !buffer.hasPoints) {
+        continue;
+      }
+      if (!_initiallyFilledChannels.contains(descriptor.key) &&
+          buffer.activeLength < _initialSampleThreshold(descriptor)) {
+        continue;
+      }
+      oldest = oldest == 0 ? buffer.oldestTimestampMs : math.min(oldest, buffer.oldestTimestampMs);
+    }
+    return oldest;
   }
 
   bool _shouldHoldChannelForInitialFill(String channelKey) {
@@ -916,7 +941,7 @@ class MonitorController extends ChangeNotifier {
   }
 
   int _initialSampleThreshold(ChannelDescriptor descriptor) {
-    final rate = _nominalDisplaySampleRate(descriptor.key, descriptor.sampleRate);
+    final rate = _displaySampleRate(descriptor.key, descriptor.sampleRate);
     final samplesForTarget = (rate * _initialBufferTargetSeconds).round();
     if (rate < 20) {
       return math.max(4, math.min(64, samplesForTarget));
@@ -1332,7 +1357,10 @@ class MonitorController extends ChangeNotifier {
     }
 
     if (_displayAnchorMs == 0) {
-      _displayAnchorMs = latestTimestampMs - (_targetPlaybackLagSeconds * 1000).round();
+      _livePlaybackStartAnchorMs = _oldestReadyVisibleTimestampMs();
+      _displayAnchorMs = _livePlaybackStartAnchorMs == 0
+          ? latestTimestampMs - (_targetPlaybackLagSeconds * 1000).round()
+          : _livePlaybackStartAnchorMs;
       _lastAnchorWallMs = nowMs;
       return _displayAnchorMs;
     }
@@ -1344,8 +1372,13 @@ class MonitorController extends ChangeNotifier {
     final targetAnchor = latestTimestampMs - (_targetPlaybackLagSeconds * 1000).round();
     final maxAnchor = latestTimestampMs - 120;
     var next = _displayAnchorMs;
-    if (targetAnchor > next + 500) {
-      next += math.min(250, elapsedMs * 5);
+    final fillUntil = _livePlaybackStartAnchorMs == 0
+        ? 0
+        : _livePlaybackStartAnchorMs + (secondsPerScreen * 1000).round();
+    if (fillUntil > 0 && next < fillUntil) {
+      next += elapsedMs;
+    } else if (targetAnchor > next + 500) {
+      next += math.min(250, elapsedMs * 3);
     } else {
       next += elapsedMs;
     }
@@ -2010,15 +2043,6 @@ WaveformSlice _buildWaveformSlice(
       appendUnique(minPoint);
     }
     appendUnique(points[end - 1]);
-  }
-
-  // Safety cap: the per-chunk envelope can produce up to 4× chunks
-  // points; truncate if we overshot maxVisiblePoints.
-  if (visible.length > maxVisiblePoints) {
-    // Keep the last point as the right-edge anchor.
-    final anchor = visible.last;
-    visible.length = maxVisiblePoints;
-    visible[maxVisiblePoints - 1] = anchor;
   }
 
   return WaveformSlice(
