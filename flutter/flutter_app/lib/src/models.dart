@@ -81,11 +81,13 @@ class TransportStats {
         'ecg': intValue('ecgQueueLen'),
         'ppg': intValue('ppgQueueLen'),
         'imu': intValue('imuQueueLen'),
+        'temp': intValue('tempQueueLen'),
       },
       dropCount: <String, int>{
         'ecg': intValue('ecgDropCount'),
         'ppg': intValue('ppgDropCount'),
         'imu': intValue('imuDropCount'),
+        'temp': intValue('tempDropCount'),
       },
       overwriteCount: mapValue('ow'),
       publishFailCount: intValue('mqttPublishFailCount'),

@@ -8,6 +8,7 @@
 
 #include "config.h"
 #include "data_logger.h"
+#include "m601_temp.h"
 #include "signal_dsp.h"
 
 namespace {
@@ -65,6 +66,7 @@ constexpr size_t kImuBatchMax = 4;
 constexpr size_t kTempBatchMax = 4;
 constexpr TickType_t kMqttTaskPeriodTicks = pdMS_TO_TICKS(20);
 constexpr uint8_t kPublishBurstsPerLoop = 1;
+constexpr uint8_t kPublishBurstsUnderPressure = 2;
 constexpr uint32_t kWifiConnectTimeoutMs = 20000;
 constexpr uint16_t kEcgQueueHighPressurePermille = 850;
 constexpr uint16_t kEcgQueueCriticalPressurePermille = 950;
@@ -561,7 +563,7 @@ bool ensureWifiConnected() {
 
     // Timed out: clear stale state then allow a clean retry.
     g_wifiConnectInProgress = false;
-    WiFi.disconnect(false, true);
+    WiFi.disconnect(false, false);
   }
 
   if ((nowMs - g_lastWifiRetryMs) < WIFI_RETRY_INTERVAL_MS) {
@@ -624,6 +626,9 @@ void publishDiagTelemetry() {
   const uint32_t qImu = (g_imuMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_imuMqttQueue));
   const uint32_t qTemp = (g_tempMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_tempMqttQueue));
   const signal_dsp::DspMetrics dsp = signal_dsp::metrics();
+  const uint32_t tempCrcFails = m601_temp::crcFailCount();
+  const uint32_t tempBusFails = m601_temp::busFailCount();
+  const uint8_t tempFlags = m601_temp::lastStatusFlags();
 
   char payload[kMqttPayloadBuffer];
   snprintf(payload, sizeof(payload),
@@ -632,6 +637,7 @@ void publishDiagTelemetry() {
            "\"tempQueueLen\":%lu,"
            "\"ecgDropCount\":%lu,\"ppgDropCount\":%lu,\"imuDropCount\":%lu,\"tempDropCount\":%lu,"
            "\"mqttPublishFailCount\":%lu,\"wifiReconnectCount\":%lu,"
+           "\"tempCrcFailCount\":%lu,\"tempBusFailCount\":%lu,\"tempStatusFlags\":%u,"
            "\"rssi\":%ld,\"heapFree\":%lu,\"lastPublishLatencyMs\":%lu,"
            "\"dsp\":{\"enabled\":%s,\"version\":%lu,\"motion\":%.3f,\"ecgQuality\":%.3f,\"ppgQuality\":%.3f,\"ecgBpm\":%.2f,\"ppgBpm\":%.2f},"
            "\"ow\":{\"ecg\":%lu,\"ppg\":%lu,\"imu\":%lu,\"temp\":%lu}}",
@@ -650,6 +656,9 @@ void publishDiagTelemetry() {
            static_cast<unsigned long>(g_dropTemp),
            static_cast<unsigned long>(g_mqttPublishFailCount),
            static_cast<unsigned long>(g_wifiReconnectCount),
+           static_cast<unsigned long>(tempCrcFails),
+           static_cast<unsigned long>(tempBusFails),
+           static_cast<unsigned>(tempFlags),
            static_cast<long>(WiFi.RSSI()),
            static_cast<unsigned long>(ESP.getFreeHeap()),
            static_cast<unsigned long>(g_lastPublishLatencyMs),
@@ -995,9 +1004,11 @@ void begin() {
   buildClientId();
   buildTopics();
 
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   WiFi.setSleep(WIFI_PS_NONE);
+  WiFi.setAutoReconnect(true);
 
   if (g_ecgMqttQueue == nullptr) {
     g_ecgMqttQueue = xQueueCreate(kEcgMqttQueueLen, sizeof(EcgSample));
@@ -1029,7 +1040,8 @@ void begin() {
 
   g_mqttClient.setServer(MQTT_BROKER_HOST, MQTT_BROKER_PORT);
   g_mqttClient.setBufferSize(kMqttPayloadBuffer + 64);
-  g_mqttClient.setKeepAlive(30);
+  g_mqttClient.setKeepAlive(45);
+  g_mqttClient.setSocketTimeout(2);
   g_mqttClient.setCallback(onMqttMessage);
 
   char msg[128];
@@ -1045,10 +1057,12 @@ void setActive(const bool active) {
 
   g_active = active;
   if (active) {
+    WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
     WiFi.setSleep(WIFI_PS_NONE);
-    WiFi.disconnect(false, true);
+    WiFi.setAutoReconnect(true);
+    WiFi.disconnect(false, false);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
     g_wifiConnectInProgress = true;
     g_wifiConnectStartMs = millis();
@@ -1221,7 +1235,11 @@ void taskLoop() {
 
     if (ensureWifiConnected() && ensureMqttConnected()) {
       publishDiagTelemetry();
-      for (uint8_t burst = 0; burst < kPublishBurstsPerLoop; ++burst) {
+      const bool queuePressure =
+          queueFillPermille(g_ecgMqttQueue, kEcgMqttQueueLen) >= 500 ||
+          queueFillPermille(g_ppgMqttQueue, kPpgMqttQueueLen) >= 500;
+      const uint8_t bursts = queuePressure ? kPublishBurstsUnderPressure : kPublishBurstsPerLoop;
+      for (uint8_t burst = 0; burst < bursts; ++burst) {
         publishEcgSamples();
         publishPpgSamples();
         publishImuSamples();

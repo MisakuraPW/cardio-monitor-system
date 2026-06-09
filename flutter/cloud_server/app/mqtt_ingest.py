@@ -330,6 +330,8 @@ def _decode_bio(payload: bytes) -> _BinaryBatch:
             )
         elif type_code == 'I':
             _decode_imu(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
+        elif type_code == 'T':
+            _decode_temperature(frame, seq, sample_count, sample_size, channels, frames, header_len, 2 if is_bio2 else 1, decode_status)
 
         cursor = magic_index + frame_length
 
@@ -438,6 +440,29 @@ def _decode_imu(
         frames.append(_frame(key, 'raw', sample_rate, timestamps_us, values, seq, frame_version, decode_status))
 
 
+def _decode_temperature(
+    frame: memoryview,
+    seq: int,
+    sample_count: int,
+    sample_size: int,
+    channels: dict[str, _BinaryChannel],
+    frames: list[_BinaryFrame],
+    payload_offset: int,
+    frame_version: int,
+    decode_status: str,
+) -> None:
+    timestamps_us: list[int] = []
+    samples: list[float] = []
+    for index in range(sample_count):
+        offset = payload_offset + index * sample_size
+        timestamps_us.append(struct.unpack_from('<Q', frame, offset)[0])
+        samples.append(float(struct.unpack_from('<f', frame, offset + 10)[0]))
+
+    sample_rate = _estimate_sample_rate(timestamps_us, 1)
+    channels['temp'] = _channel('temp', 'Temperature', 'C', sample_rate, '#E09F3E')
+    frames.append(_frame('temp', 'C', sample_rate, timestamps_us, samples, seq, frame_version, decode_status))
+
+
 def _frame(
     channel_key: str,
     unit: str,
@@ -488,6 +513,8 @@ def _sample_size_for_type(type_code: str) -> int | None:
         return 16
     if type_code == 'I':
         return 20
+    if type_code == 'T':
+        return 15
     return None
 
 

@@ -21,6 +21,7 @@ const List<String> _statusTelemetryChannelKeys = <String>[
   'imu_gz',
   'temp',
 ];
+const List<String> _demoAuxiliaryChannelKeys = <String>['temp'];
 
 abstract class DataSourceAdapter {
   Stream<SignalFrame> get streamFrames;
@@ -753,6 +754,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
   final Uuid _uuid = const Uuid();
 
   MqttBrowserClient? _client;
+  StreamSubscription<List<MqttReceivedMessage<MqttMessage>>>? _updatesSubscription;
   List<ChannelDescriptor> catalog = const <ChannelDescriptor>[];
   String _binarySessionId = 'mqtt-session';
   bool _hasSeenBinaryPayload = false;
@@ -786,7 +788,9 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     client.setProtocolV311();
     client.keepAlivePeriod = 20;
     client.connectTimeoutPeriod = 2000;
-    client.disconnectOnNoResponsePeriod = 6;
+    client.disconnectOnNoResponsePeriod = 12;
+    client.autoReconnect = true;
+    client.resubscribeOnAutoReconnect = true;
     client.logging(on: false);
     client.websocketProtocols = const <String>['mqtt'];
     client.onConnected = () {
@@ -794,6 +798,12 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     };
     client.onDisconnected = () {
       _emitStatus(AdapterState.disconnected, 'MQTT 连接已断开');
+    };
+    client.onAutoReconnect = () {
+      _emitStatus(AdapterState.connecting, 'MQTT 正在自动重连...');
+    };
+    client.onAutoReconnected = () {
+      _emitStatus(AdapterState.streaming, 'MQTT 已自动重连');
     };
     client.onFailedConnectionAttempt = (int attemptNumber) {
       _emitStatus(
@@ -856,19 +866,22 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
               'ecg_filtered',
               'ppg_ir_filtered',
               'ppg_red_filtered',
-              ..._statusTelemetryChannelKeys,
+              ..._demoAuxiliaryChannelKeys,
             ],
           },
         ),
       );
     }
-    client.updates?.listen(_handleUpdates);
+    await _updatesSubscription?.cancel();
+    _updatesSubscription = client.updates?.listen(_handleUpdates);
 
     _emitStatus(AdapterState.streaming, '正在监听 $_baseTopic/#');
   }
 
   @override
   Future<void> disconnect() async {
+    await _updatesSubscription?.cancel();
+    _updatesSubscription = null;
     _client?.disconnect();
     _client = null;
   }
@@ -882,7 +895,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
         .where((String key) => !config.demoMode || _isDemoRealtimeChannel(key))
         .toList();
     if (config.demoMode) {
-      enabledKeys.addAll(_statusTelemetryChannelKeys);
+      enabledKeys.addAll(_demoAuxiliaryChannelKeys);
     }
     await sendControl(
       ControlCommand(
@@ -1126,6 +1139,8 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
 
   @override
   void dispose() {
+    _updatesSubscription?.cancel();
+    _client?.disconnect();
     _frameController.close();
     _statusController.close();
     _catalogController.close();

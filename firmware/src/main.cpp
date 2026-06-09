@@ -38,6 +38,9 @@ bool g_bleStarted = false;
 TickType_t g_ppgLastSampleTick = 0;
 TickType_t g_imuLastSampleTick = 0;
 TickType_t g_tempLastSampleTick = 0;
+TickType_t g_tempLastFailureReportTick = 0;
+TemperatureSample g_lastTemperatureSample = {};
+bool g_hasLastTemperatureSample = false;
 
 constexpr TickType_t kPpgPeriodTicks = pdMS_TO_TICKS(PPG_SAMPLE_PERIOD_US / 1000U);
 constexpr TickType_t kImuPeriodTicks = pdMS_TO_TICKS(BMI_SAMPLE_PERIOD_US / 1000U);
@@ -49,10 +52,10 @@ constexpr TickType_t kSwitchDebounceTicks = pdMS_TO_TICKS(OUTPUT_MODE_SWITCH_DEB
 constexpr TickType_t kRadioModeSwitchDelayTicks = pdMS_TO_TICKS(500);
 constexpr uint8_t kEcgMaxSamplesPerLoop = 2;
 constexpr uint32_t kPacketizerYieldEveryLoops = 20;
-constexpr size_t kPacketizerEcgBatch = 8;
-constexpr size_t kPacketizerPpgBatch = 4;
-constexpr size_t kPacketizerImuBatch = 4;
-constexpr size_t kPacketizerTempBatch = 4;
+constexpr size_t kPacketizerEcgBatch = 16;
+constexpr size_t kPacketizerPpgBatch = 8;
+constexpr size_t kPacketizerImuBatch = 2;
+constexpr size_t kPacketizerTempBatch = 2;
 constexpr bool kEnableUartStream = (ENABLE_UART_OUTPUT == 1);
 constexpr bool kEnableWifiOutput = (ENABLE_WIFI_OUTPUT == 1);
 constexpr bool kEnableBleOutput = (ENABLE_BLE_OUTPUT == 1);
@@ -405,10 +408,21 @@ void tempTask(void* /*pvParameters*/) {
     TemperatureSample sample{};
     if (m601_temp::readSample(sample)) {
       g_tempLastSampleTick = now;
+      g_lastTemperatureSample = sample;
+      g_hasLastTemperatureSample = true;
       (void)xQueueSend(g_tempQueue, &sample, pdMS_TO_TICKS(10));
-    } else if ((now - g_tempLastSampleTick) > kSensorStallTimeout) {
-      g_tempOnline = false;
-      data_logger::logStatus("M601 stalled, entering recovery.");
+    } else {
+      if (g_hasLastTemperatureSample &&
+          (now - g_tempLastFailureReportTick) >= pdMS_TO_TICKS(2000)) {
+        g_tempLastFailureReportTick = now;
+        TemperatureSample stale = g_lastTemperatureSample;
+        stale.flags = static_cast<uint8_t>(m601_temp::lastStatusFlags() | m601_temp::TEMP_FLAG_STALE);
+        (void)xQueueSend(g_tempQueue, &stale, 0);
+      }
+      if ((now - g_tempLastSampleTick) > kSensorStallTimeout) {
+        g_tempOnline = false;
+        data_logger::logStatus("M601 stalled, entering recovery.");
+      }
     }
 
     vTaskDelayUntil(&lastWake, kTempPeriodTicks);
@@ -508,7 +522,8 @@ void IRAM_ATTR outputModeSwitchIsr() {
 }
 
 void configureOutputModeSwitch() {
-  pinMode(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN), INPUT);
+  pinMode(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN),
+          OUTPUT_MODE_SWITCH_USE_PULLUP ? INPUT_PULLUP : INPUT);
   attachInterrupt(digitalPinToInterrupt(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN)),
                   outputModeSwitchIsr,
                   CHANGE);
@@ -516,9 +531,16 @@ void configureOutputModeSwitch() {
 }
 
 OutputMode readRequestedOutputMode() {
-  return digitalRead(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN)) == HIGH
-      ? OutputMode::Wifi
-      : OutputMode::Ble;
+  uint8_t highSamples = 0;
+  for (uint8_t i = 0; i < 5; ++i) {
+    if (digitalRead(static_cast<uint8_t>(OUTPUT_MODE_SWITCH_PIN)) == HIGH) {
+      ++highSamples;
+    }
+    delay(5);
+  }
+  const bool switchHigh = highSamples >= 3;
+  const bool selectWifi = OUTPUT_MODE_SWITCH_HIGH_SELECTS_WIFI ? switchHigh : !switchHigh;
+  return selectWifi ? OutputMode::Wifi : OutputMode::Ble;
 }
 
 bool startMqttTaskIfNeeded() {

@@ -6,8 +6,15 @@
 
 namespace m601_temp {
 
+constexpr uint8_t TEMP_FLAG_CRC_OK = 0x01;
+constexpr uint8_t TEMP_FLAG_PRESENCE_OK = 0x02;
+constexpr uint8_t TEMP_FLAG_STALE = 0x04;
+constexpr uint8_t TEMP_FLAG_BUS_ERROR = 0x08;
+constexpr uint8_t TEMP_FLAG_CRC_ERROR = 0x10;
+
 bool begin();
 bool readSample(TemperatureSample& sample);
+uint8_t lastStatusFlags();
 uint32_t crcFailCount();
 uint32_t busFailCount();
 

@@ -9,15 +9,13 @@ constexpr uint8_t kCmdSkipRom = 0xCC;
 constexpr uint8_t kCmdConvertT = 0x44;
 constexpr uint8_t kCmdReadScratchpad = 0xBE;
 
-constexpr uint8_t kFlagCrcOk = 0x01;
-constexpr uint8_t kFlagPresenceOk = 0x02;
-
 portMUX_TYPE g_oneWireMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t g_crcFailCount = 0;
 uint32_t g_busFailCount = 0;
+uint8_t g_lastStatusFlags = 0;
 
 void releaseBus() {
-  pinMode(static_cast<uint8_t>(M601_DQ_PIN), INPUT);
+  pinMode(static_cast<uint8_t>(M601_DQ_PIN), INPUT_PULLUP);
 }
 
 void pullBusLow() {
@@ -139,28 +137,34 @@ bool begin() {
   digitalWrite(static_cast<uint8_t>(M601_DQ_PIN), LOW);
   releaseBus();
   delay(5);
-  return resetPulse();
+  const bool present = resetPulse();
+  g_lastStatusFlags = present ? TEMP_FLAG_PRESENCE_OK : TEMP_FLAG_BUS_ERROR;
+  return present;
 }
 
 bool readSample(TemperatureSample& sample) {
   if (!startConversion()) {
     ++g_busFailCount;
+    g_lastStatusFlags = TEMP_FLAG_BUS_ERROR;
     return false;
   }
   if (!waitForConversion()) {
     ++g_busFailCount;
+    g_lastStatusFlags = TEMP_FLAG_PRESENCE_OK | TEMP_FLAG_BUS_ERROR;
     return false;
   }
 
   uint8_t scratchpad[9] = {};
   if (!readScratchpad(scratchpad, sizeof(scratchpad))) {
     ++g_busFailCount;
+    g_lastStatusFlags = TEMP_FLAG_BUS_ERROR;
     return false;
   }
 
   const uint8_t crc = crc8Dallas(scratchpad, 8);
   if (crc != scratchpad[8]) {
     ++g_crcFailCount;
+    g_lastStatusFlags = TEMP_FLAG_PRESENCE_OK | TEMP_FLAG_CRC_ERROR;
     return false;
   }
 
@@ -172,9 +176,12 @@ bool readSample(TemperatureSample& sample) {
   sample.ts_us = time_sync::nowMicros();
   sample.raw = raw;
   sample.temp_c = (static_cast<float>(raw) / 256.0f) + 40.0f;
-  sample.flags = kFlagCrcOk | kFlagPresenceOk;
+  sample.flags = TEMP_FLAG_CRC_OK | TEMP_FLAG_PRESENCE_OK;
+  g_lastStatusFlags = sample.flags;
   return true;
 }
+
+uint8_t lastStatusFlags() { return g_lastStatusFlags; }
 
 uint32_t crcFailCount() { return g_crcFailCount; }
 

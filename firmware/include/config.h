@@ -36,7 +36,9 @@ constexpr uint32_t M601_CONVERSION_TIMEOUT_MS = 30;
 
 // Output mode switch
 constexpr gpio_num_t OUTPUT_MODE_SWITCH_PIN = GPIO_NUM_27;
-constexpr uint32_t OUTPUT_MODE_SWITCH_DEBOUNCE_MS = 50;
+constexpr uint32_t OUTPUT_MODE_SWITCH_DEBOUNCE_MS = 250;
+constexpr bool OUTPUT_MODE_SWITCH_USE_PULLUP = true;
+constexpr bool OUTPUT_MODE_SWITCH_HIGH_SELECTS_WIFI = true;
 
 // Queues
 constexpr uint32_t ECG_QUEUE_LEN = 1024;
