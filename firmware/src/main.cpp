@@ -550,7 +550,7 @@ bool startMqttTaskIfNeeded() {
   if (!g_mqttStarted) {
     cloud_mqtt::begin();
     if (xTaskCreatePinnedToCore(mqttTask, "mqtt_task", 6144, nullptr,
-                                MQTT_TASK_PRIORITY, &g_mqttTaskHandle, 0) != pdPASS) {
+                                MQTT_TASK_PRIORITY, &g_mqttTaskHandle, 1) != pdPASS) {
       data_logger::logStatus(F("MQTT task creation failed."));
       g_mqttTaskHandle = nullptr;
       return false;
