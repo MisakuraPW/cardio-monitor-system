@@ -42,6 +42,9 @@ class TransportStats {
     this.decodeErrorCount = 0,
     this.crcErrorCount = 0,
     this.wifiReconnectCount = 0,
+    this.mqttDisconnectCount = 0,
+    this.mqttOutboxRejectCount = 0,
+    this.mqttOutboxBytes = 0,
     this.lastPublishLatencyMs = 0,
     this.ingestLatencyMs = 0,
     this.metadata = const <String, dynamic>{},
@@ -58,6 +61,9 @@ class TransportStats {
   final int decodeErrorCount;
   final int crcErrorCount;
   final int wifiReconnectCount;
+  final int mqttDisconnectCount;
+  final int mqttOutboxRejectCount;
+  final int mqttOutboxBytes;
   final int lastPublishLatencyMs;
   final int ingestLatencyMs;
   final Map<String, dynamic> metadata;
@@ -92,6 +98,9 @@ class TransportStats {
       overwriteCount: mapValue('ow'),
       publishFailCount: intValue('mqttPublishFailCount'),
       wifiReconnectCount: intValue('wifiReconnectCount'),
+      mqttDisconnectCount: intValue('mqttDisconnectCount'),
+      mqttOutboxRejectCount: intValue('mqttOutboxRejectCount'),
+      mqttOutboxBytes: intValue('mqttOutboxBytes'),
       lastPublishLatencyMs: intValue('lastPublishLatencyMs'),
       metadata: json,
     );

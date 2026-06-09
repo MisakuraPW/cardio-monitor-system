@@ -2,7 +2,9 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <PubSubClient.h>
+#include <esp_event.h>
+#include <esp_idf_version.h>
+#include <mqtt_client.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -13,8 +15,7 @@
 
 namespace {
 
-WiFiClient g_wifiClient;
-PubSubClient g_mqttClient(g_wifiClient);
+esp_mqtt_client_handle_t g_mqttClient = nullptr;
 QueueHandle_t g_ecgMqttQueue = nullptr;
 QueueHandle_t g_ppgMqttQueue = nullptr;
 QueueHandle_t g_imuMqttQueue = nullptr;
@@ -27,10 +28,11 @@ uint32_t g_ppgSeq = 0;
 uint32_t g_imuSeq = 0;
 uint32_t g_tempSeq = 0;
 uint32_t g_lastWifiRetryMs = 0;
-uint32_t g_lastMqttRetryMs = 0;
 uint32_t g_lastDiagPublishMs = 0;
 bool g_active = false;
 bool g_wifiConnectInProgress = false;
+bool g_mqttClientStarted = false;
+volatile bool g_mqttConnected = false;
 uint32_t g_wifiConnectStartMs = 0;
 constexpr bool kDemoWifiMode = true;
 constexpr bool kDemoPublishRawWaveforms = !kDemoWifiMode;
@@ -50,6 +52,8 @@ uint32_t g_overwriteImu = 0;
 uint32_t g_overwriteTemp = 0;
 uint32_t g_wifiReconnectCount = 0;
 uint32_t g_mqttPublishFailCount = 0;
+uint32_t g_mqttDisconnectCount = 0;
+uint32_t g_mqttOutboxRejectCount = 0;
 uint32_t g_lastPublishLatencyMs = 0;
 uint32_t g_ppgPressureDecimateCounter = 0;
 uint32_t g_imuPressureDecimateCounter = 0;
@@ -68,6 +72,7 @@ constexpr TickType_t kMqttTaskPeriodTicks = pdMS_TO_TICKS(20);
 constexpr uint8_t kPublishBurstsPerLoop = 1;
 constexpr uint8_t kPublishBurstsUnderPressure = 2;
 constexpr uint32_t kWifiConnectTimeoutMs = 20000;
+constexpr int kMqttOutboxPressureBytes = 12000;
 constexpr uint16_t kEcgQueueHighPressurePermille = 850;
 constexpr uint16_t kEcgQueueCriticalPressurePermille = 950;
 constexpr uint16_t kPpgQueueHighPressurePermille = 850;
@@ -78,6 +83,7 @@ constexpr bool kJsonPayloadEnabled = (MQTT_PAYLOAD_MODE == 0) || (MQTT_PAYLOAD_M
 constexpr bool kBinaryPayloadEnabled = (MQTT_PAYLOAD_MODE == 1) || (MQTT_PAYLOAD_MODE == 2);
 
 char g_sessionId[48] = {};
+char g_brokerUri[96] = {};
 char g_topicStatus[96] = {};
 char g_topicMetrics[96] = {};
 char g_topicControl[96] = {};
@@ -195,28 +201,62 @@ bool publishTextTracked(const char* topic, const char* payload, bool retained) {
   if (topic == nullptr || payload == nullptr) {
     return false;
   }
+  if (g_mqttClient == nullptr || !g_mqttConnected) {
+    ++g_mqttPublishFailCount;
+    return false;
+  }
+  const int outboxBytes = esp_mqtt_client_get_outbox_size(g_mqttClient);
+  if (outboxBytes >= kMqttOutboxPressureBytes) {
+    ++g_mqttOutboxRejectCount;
+    ++g_mqttPublishFailCount;
+    return false;
+  }
 
   const uint32_t t0 = millis();
-  const bool ok = g_mqttClient.publish(topic, payload, retained);
+  const int msgId = esp_mqtt_client_enqueue(g_mqttClient,
+                                            topic,
+                                            payload,
+                                            static_cast<int>(strlen(payload)),
+                                            0,
+                                            retained ? 1 : 0,
+                                            true);
   g_lastPublishLatencyMs = millis() - t0;
-  if (!ok) {
+  if (msgId < 0) {
     ++g_mqttPublishFailCount;
+    return false;
   }
-  return ok;
+  return true;
 }
 
 bool publishBinaryTracked(const char* topic, const uint8_t* payload, const size_t len, bool retained) {
   if (topic == nullptr || payload == nullptr || len == 0) {
     return false;
   }
+  if (g_mqttClient == nullptr || !g_mqttConnected) {
+    ++g_mqttPublishFailCount;
+    return false;
+  }
+  const int outboxBytes = esp_mqtt_client_get_outbox_size(g_mqttClient);
+  if (outboxBytes >= kMqttOutboxPressureBytes) {
+    ++g_mqttOutboxRejectCount;
+    ++g_mqttPublishFailCount;
+    return false;
+  }
 
   const uint32_t t0 = millis();
-  const bool ok = g_mqttClient.publish(topic, payload, len, retained);
+  const int msgId = esp_mqtt_client_enqueue(g_mqttClient,
+                                            topic,
+                                            reinterpret_cast<const char*>(payload),
+                                            static_cast<int>(len),
+                                            0,
+                                            retained ? 1 : 0,
+                                            true);
   g_lastPublishLatencyMs = millis() - t0;
-  if (!ok) {
+  if (msgId < 0) {
     ++g_mqttPublishFailCount;
+    return false;
   }
-  return ok;
+  return true;
 }
 
 template <typename T>
@@ -238,6 +278,9 @@ void buildClientId() {
            static_cast<unsigned>(chipId & 0xFFFFU));
   snprintf(g_sessionId, sizeof(g_sessionId), "%s-%04X", MQTT_SESSION_ID,
            static_cast<unsigned>(chipId & 0xFFFFU));
+  snprintf(g_brokerUri, sizeof(g_brokerUri), "mqtt://%s:%u",
+           MQTT_BROKER_HOST,
+           static_cast<unsigned>(MQTT_BROKER_PORT));
 }
 
 void buildTopics() {
@@ -308,6 +351,17 @@ bool extractBoolValue(const char* text, const char* key, bool* out) {
 
 void publishDiagTelemetry();
 
+void publishOnlineStatus() {
+  char onlinePayload[128];
+  snprintf(onlinePayload, sizeof(onlinePayload),
+           "{\"deviceId\":\"%s\",\"clientId\":\"%s\",\"sessionId\":\"%s\",\"status\":\"online\",\"timestampMs\":%lu}",
+           MQTT_TOPIC_DEVICE_ID,
+           g_clientId,
+           g_sessionId,
+           static_cast<unsigned long>(millis()));
+  (void)publishTextTracked(g_topicStatus, onlinePayload, true);
+}
+
 void resetCounters() {
   g_dropEcg = 0;
   g_dropPpg = 0;
@@ -318,6 +372,8 @@ void resetCounters() {
   g_overwriteImu = 0;
   g_overwriteTemp = 0;
   g_mqttPublishFailCount = 0;
+  g_mqttDisconnectCount = 0;
+  g_mqttOutboxRejectCount = 0;
   g_wifiReconnectCount = 0;
   g_ppgPressureDecimateCounter = 0;
   g_imuPressureDecimateCounter = 0;
@@ -394,16 +450,52 @@ void handleControlPayload(const char* payload) {
   }
 }
 
-void onMqttMessage(char* topic, uint8_t* payload, unsigned int length) {
-  if (topic == nullptr || strcmp(topic, g_topicControl) != 0) {
+bool mqttEventTopicEquals(const esp_mqtt_event_handle_t event, const char* expected) {
+  if (event == nullptr || expected == nullptr || event->topic == nullptr) {
+    return false;
+  }
+  const int expectedLen = static_cast<int>(strlen(expected));
+  return event->topic_len == expectedLen && strncmp(event->topic, expected, expectedLen) == 0;
+}
+
+void handleMqttData(const esp_mqtt_event_handle_t event) {
+  if (!mqttEventTopicEquals(event, g_topicControl)) {
     return;
   }
   char buffer[256];
   const unsigned int limit = static_cast<unsigned int>(sizeof(buffer) - 1U);
-  const unsigned int copyLen = length < limit ? length : limit;
-  memcpy(buffer, payload, copyLen);
+  const unsigned int copyLen = event->data_len < static_cast<int>(limit)
+      ? static_cast<unsigned int>(event->data_len)
+      : limit;
+  memcpy(buffer, event->data, copyLen);
   buffer[copyLen] = '\0';
   handleControlPayload(buffer);
+}
+
+void onMqttEvent(void* /*handlerArgs*/, esp_event_base_t /*base*/, int32_t eventId, void* eventData) {
+  const esp_mqtt_event_handle_t event = static_cast<esp_mqtt_event_handle_t>(eventData);
+  switch (eventId) {
+    case MQTT_EVENT_CONNECTED:
+      g_mqttConnected = true;
+      data_logger::logStatus("[NET] MQTT connected.");
+      (void)esp_mqtt_client_subscribe(g_mqttClient, g_topicControl, 1);
+      publishOnlineStatus();
+      publishDiagTelemetry();
+      break;
+    case MQTT_EVENT_DISCONNECTED:
+      g_mqttConnected = false;
+      ++g_mqttDisconnectCount;
+      data_logger::logStatus("[NET] MQTT disconnected.");
+      break;
+    case MQTT_EVENT_DATA:
+      handleMqttData(event);
+      break;
+    case MQTT_EVENT_ERROR:
+      data_logger::logStatus("[NET] MQTT event error.");
+      break;
+    default:
+      break;
+  }
 }
 
 uint64_t tsUsToMs(const uint64_t tsUs) {
@@ -581,37 +673,26 @@ bool ensureWifiConnected() {
   return false;
 }
 
-bool ensureMqttConnected() {
-  if (g_mqttClient.connected()) {
-    return true;
-  }
-
-  const uint32_t nowMs = millis();
-  if ((nowMs - g_lastMqttRetryMs) < MQTT_RETRY_INTERVAL_MS) {
+bool ensureMqttStarted() {
+  if (g_mqttClient == nullptr) {
     return false;
   }
-  g_lastMqttRetryMs = nowMs;
-
-  data_logger::logStatus("[NET] Connecting MQTT...");
-  const bool ok = g_mqttClient.connect(g_clientId);
-  if (!ok) {
-    char msg[96];
-    snprintf(msg, sizeof(msg), "[NET] MQTT connect failed, rc=%d", g_mqttClient.state());
-    data_logger::logStatus(msg);
+  if (g_mqttClientStarted) {
+    return g_mqttConnected;
+  }
+  if (WiFi.status() != WL_CONNECTED) {
     return false;
   }
 
-  char onlinePayload[128];
-  snprintf(onlinePayload, sizeof(onlinePayload),
-           "{\"deviceId\":\"%s\",\"clientId\":\"%s\",\"sessionId\":\"%s\",\"status\":\"online\",\"timestampMs\":%lu}",
-           MQTT_TOPIC_DEVICE_ID,
-           g_clientId,
-           g_sessionId,
-           static_cast<unsigned long>(millis()));
-  (void)publishTextTracked(g_topicStatus, onlinePayload, true);
-  (void)g_mqttClient.subscribe(g_topicControl, 1);
-  data_logger::logStatus("[NET] MQTT connected.");
-  return true;
+  const esp_err_t err = esp_mqtt_client_start(g_mqttClient);
+  if (err != ESP_OK) {
+    ++g_mqttPublishFailCount;
+    data_logger::logStatus("[NET] MQTT start failed.");
+    return false;
+  }
+  g_mqttClientStarted = true;
+  data_logger::logStatus("[NET] MQTT async client started.");
+  return false;
 }
 
 void publishDiagTelemetry() {
@@ -629,6 +710,7 @@ void publishDiagTelemetry() {
   const uint32_t tempCrcFails = m601_temp::crcFailCount();
   const uint32_t tempBusFails = m601_temp::busFailCount();
   const uint8_t tempFlags = m601_temp::lastStatusFlags();
+  const int mqttOutboxBytes = (g_mqttClient == nullptr) ? 0 : esp_mqtt_client_get_outbox_size(g_mqttClient);
 
   char payload[kMqttPayloadBuffer];
   snprintf(payload, sizeof(payload),
@@ -636,7 +718,8 @@ void publishDiagTelemetry() {
            "\"ecgQueueLen\":%lu,\"ppgQueueLen\":%lu,\"imuQueueLen\":%lu,"
            "\"tempQueueLen\":%lu,"
            "\"ecgDropCount\":%lu,\"ppgDropCount\":%lu,\"imuDropCount\":%lu,\"tempDropCount\":%lu,"
-           "\"mqttPublishFailCount\":%lu,\"wifiReconnectCount\":%lu,"
+           "\"mqttPublishFailCount\":%lu,\"mqttDisconnectCount\":%lu,\"mqttOutboxRejectCount\":%lu,"
+           "\"mqttOutboxBytes\":%d,\"mqttConnected\":%s,\"wifiReconnectCount\":%lu,"
            "\"tempCrcFailCount\":%lu,\"tempBusFailCount\":%lu,\"tempStatusFlags\":%u,"
            "\"rssi\":%ld,\"heapFree\":%lu,\"lastPublishLatencyMs\":%lu,"
            "\"dsp\":{\"enabled\":%s,\"version\":%lu,\"motion\":%.3f,\"ecgQuality\":%.3f,\"ppgQuality\":%.3f,\"ecgBpm\":%.2f,\"ppgBpm\":%.2f},"
@@ -655,6 +738,10 @@ void publishDiagTelemetry() {
            static_cast<unsigned long>(g_dropImu),
            static_cast<unsigned long>(g_dropTemp),
            static_cast<unsigned long>(g_mqttPublishFailCount),
+           static_cast<unsigned long>(g_mqttDisconnectCount),
+           static_cast<unsigned long>(g_mqttOutboxRejectCount),
+           mqttOutboxBytes,
+           g_mqttConnected ? "true" : "false",
            static_cast<unsigned long>(g_wifiReconnectCount),
            static_cast<unsigned long>(tempCrcFails),
            static_cast<unsigned long>(tempBusFails),
@@ -1038,15 +1125,46 @@ void begin() {
     }
   }
 
-  g_mqttClient.setServer(MQTT_BROKER_HOST, MQTT_BROKER_PORT);
-  g_mqttClient.setBufferSize(kMqttPayloadBuffer + 64);
-  g_mqttClient.setKeepAlive(45);
-  g_mqttClient.setSocketTimeout(2);
-  g_mqttClient.setCallback(onMqttMessage);
+  if (g_mqttClient == nullptr) {
+    esp_mqtt_client_config_t mqttConfig = {};
+#if ESP_IDF_VERSION_MAJOR >= 5
+    mqttConfig.broker.address.uri = g_brokerUri;
+    mqttConfig.credentials.client_id = g_clientId;
+    mqttConfig.session.keepalive = 45;
+    mqttConfig.network.disable_auto_reconnect = false;
+    mqttConfig.network.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
+    mqttConfig.network.timeout_ms = 2000;
+    mqttConfig.task.stack_size = 6144;
+    mqttConfig.task.priority = MQTT_TASK_PRIORITY;
+    mqttConfig.buffer.size = kMqttPayloadBuffer + 64;
+    mqttConfig.buffer.out_size = kMqttPayloadBuffer + 64;
+#else
+    mqttConfig.uri = g_brokerUri;
+    mqttConfig.client_id = g_clientId;
+    mqttConfig.keepalive = 45;
+    mqttConfig.disable_auto_reconnect = false;
+    mqttConfig.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
+    mqttConfig.network_timeout_ms = 2000;
+    mqttConfig.task_stack = 6144;
+    mqttConfig.task_prio = MQTT_TASK_PRIORITY;
+    mqttConfig.buffer_size = kMqttPayloadBuffer + 64;
+    mqttConfig.out_buffer_size = kMqttPayloadBuffer + 64;
+#endif
+
+    g_mqttClient = esp_mqtt_client_init(&mqttConfig);
+    if (g_mqttClient == nullptr) {
+      data_logger::logStatus("[NET] MQTT async client init failed.");
+    } else {
+      (void)esp_mqtt_client_register_event(g_mqttClient,
+                                           ESP_EVENT_ANY_ID,
+                                           onMqttEvent,
+                                           nullptr);
+    }
+  }
 
   char msg[128];
-  snprintf(msg, sizeof(msg), "[NET] MQTT init host=%s:%d id=%s ecgBin=%s",
-           MQTT_BROKER_HOST, MQTT_BROKER_PORT, g_clientId, g_topicWaveBinEcg);
+  snprintf(msg, sizeof(msg), "[NET] MQTT async init uri=%s id=%s ecgBin=%s",
+           g_brokerUri, g_clientId, g_topicWaveBinEcg);
   data_logger::logStatus(msg);
 }
 
@@ -1057,6 +1175,9 @@ void setActive(const bool active) {
 
   g_active = active;
   if (active) {
+    if (g_mqttClient == nullptr) {
+      begin();
+    }
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);
@@ -1069,9 +1190,15 @@ void setActive(const bool active) {
     g_lastWifiRetryMs = g_wifiConnectStartMs;
     data_logger::logStatus("[NET] WiFi/MQTT output active.");
   } else {
-    if (g_mqttClient.connected()) {
-      g_mqttClient.disconnect();
+    if (g_mqttClient != nullptr && g_mqttClientStarted) {
+      (void)esp_mqtt_client_stop(g_mqttClient);
     }
+    if (g_mqttClient != nullptr) {
+      (void)esp_mqtt_client_destroy(g_mqttClient);
+      g_mqttClient = nullptr;
+    }
+    g_mqttClientStarted = false;
+    g_mqttConnected = false;
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_OFF);
     if (g_ecgMqttQueue != nullptr) {
@@ -1233,7 +1360,9 @@ void taskLoop() {
       continue;
     }
 
-    if (ensureWifiConnected() && ensureMqttConnected()) {
+    const bool wifiReady = ensureWifiConnected();
+    const bool mqttReady = wifiReady && ensureMqttStarted();
+    if (wifiReady && mqttReady) {
       publishDiagTelemetry();
       const bool queuePressure =
           queueFillPermille(g_ecgMqttQueue, kEcgMqttQueueLen) >= 500 ||
@@ -1245,10 +1374,6 @@ void taskLoop() {
         publishImuSamples();
         publishTemperatureSamples();
       }
-      g_mqttClient.loop();
-    } else {
-      // Keep MQTT client state machine moving during reconnect windows.
-      g_mqttClient.loop();
     }
 
     vTaskDelayUntil(&lastWake, kMqttTaskPeriodTicks);
