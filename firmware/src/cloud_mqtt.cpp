@@ -60,25 +60,29 @@ int g_mqttLastConnectReturnCode = 0;
 int g_mqttLastSockErr = 0;
 int g_mqttLastTlsErr = 0;
 uint32_t g_lastPublishLatencyMs = 0;
-uint32_t g_ppgPressureDecimateCounter = 0;
 uint32_t g_imuPressureDecimateCounter = 0;
 uint32_t g_demoImuDecimateCounter = 0;
 
-constexpr size_t kEcgBatchMax = 80;
-constexpr size_t kPpgBatchMax = 40;
+constexpr size_t kEcgBatchMax = 160;
+constexpr size_t kPpgBatchMax = 80;
 constexpr size_t kImuBatchMax = 4;
 constexpr size_t kTempBatchMax = 4;
 constexpr uint32_t kWifiConnectTimeoutMs = 20000;
 constexpr uint32_t kMqttStartRetryIntervalMs = 3000;
 constexpr uint32_t kNetPollLogIntervalMs = 3000;
 constexpr int kEspMqttTaskStack = 6144;
-constexpr int kEspMqttTaskPriority = 2;
+constexpr int kEspMqttTaskPriority = MQTT_TASK_PRIORITY;
 constexpr int kMqttOutboxPressureBytes = 8192;
 constexpr uint16_t kOutboxHighPressurePermille = 850;
 
-constexpr size_t kMqttPayloadBuffer = 1024;
+constexpr size_t kMqttPayloadBuffer = 2048;
 constexpr bool kJsonPayloadEnabled = (MQTT_PAYLOAD_MODE == 0) || (MQTT_PAYLOAD_MODE == 2);
 constexpr bool kBinaryPayloadEnabled = (MQTT_PAYLOAD_MODE == 1) || (MQTT_PAYLOAD_MODE == 2);
+
+static_assert((kEcgBatchMax * 12U + 19U) <= kMqttPayloadBuffer,
+              "ECG BIO2 frame exceeds MQTT payload buffer");
+static_assert((kPpgBatchMax * 16U + 19U) <= kMqttPayloadBuffer,
+              "PPG BIO2 frame exceeds MQTT payload buffer");
 
 char g_sessionId[48] = {};
 char g_brokerUri[96] = {};
@@ -224,21 +228,14 @@ bool publishBinaryTracked(const char* topic, const uint8_t* payload, const size_
     ++g_mqttPublishFailCount;
     return false;
   }
-  const int outboxBytes = esp_mqtt_client_get_outbox_size(g_mqttClient);
-  if (outboxBytes >= kMqttOutboxPressureBytes) {
-    ++g_mqttOutboxRejectCount;
-    ++g_mqttPublishFailCount;
-    return false;
-  }
 
   const uint32_t t0 = millis();
-  const int msgId = esp_mqtt_client_enqueue(g_mqttClient,
+  const int msgId = esp_mqtt_client_publish(g_mqttClient,
                                             topic,
                                             reinterpret_cast<const char*>(payload),
                                             static_cast<int>(len),
                                             0,
-                                            retained ? 1 : 0,
-                                            true);
+                                            retained ? 1 : 0);
   g_lastPublishLatencyMs = millis() - t0;
   if (msgId < 0) {
     ++g_mqttPublishFailCount;
@@ -372,7 +369,6 @@ void resetCounters() {
   g_mqttLastSockErr = 0;
   g_mqttLastTlsErr = 0;
   g_wifiReconnectCount = 0;
-  g_ppgPressureDecimateCounter = 0;
   g_imuPressureDecimateCounter = 0;
   g_demoImuDecimateCounter = 0;
 }
@@ -902,6 +898,7 @@ void publishEcgBatch(const EcgSample* batch, const size_t n) {
     }
     finishBio2Frame(filteredPayload, filteredOffset, filteredOff - filteredOffset);
     if (!publishBinaryTracked(g_topicWaveBinEcgFiltered, filteredPayload, filteredOff, false)) {
+      g_dropEcg += static_cast<uint32_t>(n);
       data_logger::logStatus("[NET] MQTT ECG filtered BIN publish failed.");
     }
   }
@@ -985,6 +982,7 @@ void publishPpgBatch(const PpgSample* batch, const size_t n) {
     }
     finishBio2Frame(filteredPayload, filteredOffset, filteredOff - filteredOffset);
     if (!publishBinaryTracked(g_topicWaveBinPpgFiltered, filteredPayload, filteredOff, false)) {
+      g_dropPpg += static_cast<uint32_t>(n);
       data_logger::logStatus("[NET] MQTT PPG filtered BIN publish failed.");
     }
   }
@@ -1152,7 +1150,7 @@ void begin() {
     mqttConfig.session.keepalive = 45;
     mqttConfig.network.disable_auto_reconnect = false;
     mqttConfig.network.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
-    mqttConfig.network.timeout_ms = 2000;
+    mqttConfig.network.timeout_ms = 500;
     mqttConfig.task.stack_size = kEspMqttTaskStack;
     mqttConfig.task.priority = kEspMqttTaskPriority;
     mqttConfig.buffer.size = kMqttPayloadBuffer + 64;
@@ -1163,7 +1161,7 @@ void begin() {
     mqttConfig.keepalive = 45;
     mqttConfig.disable_auto_reconnect = false;
     mqttConfig.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
-    mqttConfig.network_timeout_ms = 2000;
+    mqttConfig.network_timeout_ms = 500;
     mqttConfig.task_stack = kEspMqttTaskStack;
     mqttConfig.task_prio = kEspMqttTaskPriority;
     mqttConfig.buffer_size = kMqttPayloadBuffer + 64;
@@ -1249,10 +1247,6 @@ bool enqueueEcg(const EcgSample& sample) {
   if (!ensureAsyncReady()) {
     return true;
   }
-  if (outboxFillPermille() >= kOutboxHighPressurePermille) {
-    ++g_dropEcg;
-    return true;
-  }
   g_ecgBatch[g_ecgBatchCount++] = sample;
   if (g_ecgBatchCount >= kEcgBatchMax) {
     publishEcgBatch(g_ecgBatch, g_ecgBatchCount);
@@ -1271,19 +1265,6 @@ bool enqueuePpg(const PpgSample& sample) {
   if (!ensureAsyncReady()) {
     return true;
   }
-  if (outboxFillPermille() >= kOutboxHighPressurePermille) {
-    ++g_dropPpg;
-    return true;
-  }
-
-  if (g_ecgBatchCount >= (kEcgBatchMax * 3U / 4U)) {
-    ++g_ppgPressureDecimateCounter;
-    if ((g_ppgPressureDecimateCounter & 0x01U) == 0U) {
-      ++g_dropPpg;
-      return true;
-    }
-  }
-
   g_ppgBatch[g_ppgBatchCount++] = sample;
   if (g_ppgBatchCount >= kPpgBatchMax) {
     publishPpgBatch(g_ppgBatch, g_ppgBatchCount);

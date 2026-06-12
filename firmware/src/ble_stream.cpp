@@ -660,8 +660,18 @@ void begin() {
   service->start();
 
   NimBLEAdvertising* advertising = NimBLEDevice::getAdvertising();
-  advertising->addServiceUUID(service->getUUID());
-  advertising->setScanResponse(true);
+  if (advertising != nullptr) {
+    NimBLEAdvertisementData advData;
+    advData.setFlags(BLE_HS_ADV_F_DISC_GEN);
+    advData.setCompleteServices(service->getUUID());
+
+    NimBLEAdvertisementData scanData;
+    scanData.setName(BLE_DEVICE_NAME);
+
+    advertising->setAdvertisementData(advData);
+    advertising->setScanResponseData(scanData);
+    advertising->setScanResponse(true);
+  }
 
   if (g_ecgBleQueue == nullptr) {
     g_ecgBleQueue = xQueueCreate(BLE_ECG_QUEUE_LEN, sizeof(EcgSample));
