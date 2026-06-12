@@ -1156,7 +1156,7 @@ void begin() {
       data_logger::logStatus("[NET] MQTT async client init failed.");
     } else {
       (void)esp_mqtt_client_register_event(g_mqttClient,
-                                           ESP_EVENT_ANY_ID,
+                                           static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID),
                                            onMqttEvent,
                                            nullptr);
     }
