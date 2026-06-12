@@ -48,6 +48,7 @@ constexpr TickType_t kTempPeriodTicks = pdMS_TO_TICKS(M601_SAMPLE_PERIOD_MS);
 constexpr TickType_t kEcgPeriodTicks = pdMS_TO_TICKS(2);
 constexpr TickType_t kSensorStallTimeout = pdMS_TO_TICKS(2000);
 constexpr TickType_t kReinitRetryInterval = pdMS_TO_TICKS(1000);
+constexpr TickType_t kTempReinitRetryInterval = pdMS_TO_TICKS(5000);
 constexpr TickType_t kSwitchDebounceTicks = pdMS_TO_TICKS(OUTPUT_MODE_SWITCH_DEBOUNCE_MS);
 constexpr TickType_t kRadioModeSwitchDelayTicks = pdMS_TO_TICKS(500);
 constexpr uint8_t kEcgMaxSamplesPerLoop = 2;
@@ -307,7 +308,13 @@ bool bringUpImu(const bool recoveryMode) {
 
 bool bringUpTemp(const bool recoveryMode) {
   if (!m601_temp::begin()) {
-    data_logger::logStatus(recoveryMode ? "M601 reinit failed." : "M601 init failed.");
+    const uint8_t flags = m601_temp::lastStatusFlags();
+    char msg[96];
+    snprintf(msg, sizeof(msg), recoveryMode ? "M601 reinit failed flags=0x%02X idleLow=%u noPresence=%u."
+                                            : "M601 init failed flags=0x%02X idleLow=%u noPresence=%u.",
+             flags, (flags & m601_temp::TEMP_FLAG_IDLE_LOW) != 0,
+             (flags & m601_temp::TEMP_FLAG_NO_PRESENCE) != 0);
+    data_logger::logStatus(msg);
     return false;
   }
   g_tempLastSampleTick = xTaskGetTickCount();
@@ -400,7 +407,7 @@ void tempTask(void* /*pvParameters*/) {
     const TickType_t now = xTaskGetTickCount();
 
     if (!g_tempOnline) {
-      if ((now - lastRetryTick) >= kReinitRetryInterval) {
+      if ((now - lastRetryTick) >= kTempReinitRetryInterval) {
         lastRetryTick = now;
         g_tempOnline = bringUpTemp(true);
       }

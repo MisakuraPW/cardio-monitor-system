@@ -11,6 +11,8 @@ constexpr uint8_t TEMP_FLAG_PRESENCE_OK = 0x02;
 constexpr uint8_t TEMP_FLAG_STALE = 0x04;
 constexpr uint8_t TEMP_FLAG_BUS_ERROR = 0x08;
 constexpr uint8_t TEMP_FLAG_CRC_ERROR = 0x10;
+constexpr uint8_t TEMP_FLAG_IDLE_LOW = 0x20;
+constexpr uint8_t TEMP_FLAG_NO_PRESENCE = 0x40;
 
 bool begin();
 bool readSample(TemperatureSample& sample);

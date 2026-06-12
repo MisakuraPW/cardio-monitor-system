@@ -8,6 +8,8 @@ namespace {
 constexpr uint8_t kCmdSkipRom = 0xCC;
 constexpr uint8_t kCmdConvertT = 0x44;
 constexpr uint8_t kCmdReadScratchpad = 0xBE;
+constexpr uint16_t kResetLowUs = 960;
+constexpr uint16_t kResetLowUsLowVoltageFallback = 2000;
 
 portMUX_TYPE g_oneWireMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t g_crcFailCount = 0;
@@ -15,6 +17,7 @@ uint32_t g_busFailCount = 0;
 uint8_t g_lastStatusFlags = 0;
 
 void releaseBus() {
+  digitalWrite(static_cast<uint8_t>(M601_DQ_PIN), HIGH);
   pinMode(static_cast<uint8_t>(M601_DQ_PIN), INPUT_PULLUP);
 }
 
@@ -23,14 +26,21 @@ void pullBusLow() {
   pinMode(static_cast<uint8_t>(M601_DQ_PIN), OUTPUT);
 }
 
-bool resetPulse() {
+bool resetPulse(const uint16_t resetLowUs = kResetLowUs) {
   portENTER_CRITICAL(&g_oneWireMux);
   pullBusLow();
-  delayMicroseconds(500);
+  delayMicroseconds(resetLowUs);
   releaseBus();
-  delayMicroseconds(70);
-  const bool present = (digitalRead(static_cast<uint8_t>(M601_DQ_PIN)) == LOW);
-  delayMicroseconds(410);
+
+  bool present = false;
+  delayMicroseconds(15);
+  for (uint8_t i = 0; i < 48; ++i) {
+    if (digitalRead(static_cast<uint8_t>(M601_DQ_PIN)) == LOW) {
+      present = true;
+    }
+    delayMicroseconds(5);
+  }
+  delayMicroseconds(260);
   portEXIT_CRITICAL(&g_oneWireMux);
   return present;
 }
@@ -104,14 +114,8 @@ bool startConversion() {
 }
 
 bool waitForConversion() {
-  const uint32_t startMs = millis();
-  while ((millis() - startMs) < M601_CONVERSION_TIMEOUT_MS) {
-    if (readBit()) {
-      return true;
-    }
-    delay(1);
-  }
-  return false;
+  delay(M601_CONVERSION_TIMEOUT_MS);
+  return true;
 }
 
 bool readScratchpad(uint8_t* scratchpad, const size_t len) {
@@ -134,12 +138,28 @@ bool readScratchpad(uint8_t* scratchpad, const size_t len) {
 namespace m601_temp {
 
 bool begin() {
-  digitalWrite(static_cast<uint8_t>(M601_DQ_PIN), LOW);
   releaseBus();
-  delay(5);
-  const bool present = resetPulse();
-  g_lastStatusFlags = present ? TEMP_FLAG_PRESENCE_OK : TEMP_FLAG_BUS_ERROR;
-  return present;
+  delay(10);
+
+  uint8_t lastFailureFlags = TEMP_FLAG_BUS_ERROR;
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    const bool idleHigh = digitalRead(static_cast<uint8_t>(M601_DQ_PIN)) == HIGH;
+    if (!idleHigh) {
+      lastFailureFlags = TEMP_FLAG_BUS_ERROR | TEMP_FLAG_IDLE_LOW;
+      delay(20);
+      continue;
+    }
+
+    if (resetPulse(kResetLowUs) || resetPulse(kResetLowUsLowVoltageFallback)) {
+      g_lastStatusFlags = TEMP_FLAG_PRESENCE_OK;
+      return true;
+    }
+    lastFailureFlags = TEMP_FLAG_BUS_ERROR | TEMP_FLAG_NO_PRESENCE;
+    delay(20);
+  }
+
+  g_lastStatusFlags = lastFailureFlags;
+  return false;
 }
 
 bool readSample(TemperatureSample& sample) {

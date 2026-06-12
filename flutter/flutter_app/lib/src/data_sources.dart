@@ -1736,13 +1736,19 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
   }
 
   dynamic _buildRequestOptions() {
-    // Use the broad picker by default. ESP32/NimBLE devices are often visible
-    // to phone Bluetooth settings while Chrome cannot match them through
-    // strict name/service filters because the name or 128-bit UUID may only be
-    // present in scan response data, or may differ in case after reflashing.
+    final filters = <Map<String, dynamic>>[];
+    final namePrefix = config.deviceNamePrefix.trim();
+    if (namePrefix.isNotEmpty) {
+      filters.add(<String, dynamic>{'namePrefix': namePrefix});
+    }
+    final serviceUuid = config.serviceUuid.trim();
+    if (serviceUuid.isNotEmpty) {
+      filters.add(<String, dynamic>{'services': <String>[serviceUuid]});
+    }
+
     final options = <String, dynamic>{
-      'acceptAllDevices': true,
-      'optionalServices': <String>[config.serviceUuid],
+      if (filters.isEmpty) 'acceptAllDevices': true else 'filters': filters,
+      if (serviceUuid.isNotEmpty) 'optionalServices': <String>[serviceUuid],
     };
     return js_util.jsify(options);
   }

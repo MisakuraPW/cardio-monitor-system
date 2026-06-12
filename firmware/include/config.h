@@ -32,7 +32,7 @@ constexpr uint32_t BMI_SPI_CLOCK_HZ = 1000000;
 constexpr gpio_num_t M601_DQ_PIN = GPIO_NUM_14;
 constexpr uint32_t M601_SAMPLE_RATE_HZ = 1;
 constexpr uint32_t M601_SAMPLE_PERIOD_MS = 1000UL / M601_SAMPLE_RATE_HZ;
-constexpr uint32_t M601_CONVERSION_TIMEOUT_MS = 30;
+constexpr uint32_t M601_CONVERSION_TIMEOUT_MS = 100;
 
 // Output mode switch
 constexpr gpio_num_t OUTPUT_MODE_SWITCH_PIN = GPIO_NUM_27;
