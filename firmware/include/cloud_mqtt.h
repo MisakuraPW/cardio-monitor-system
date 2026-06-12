@@ -6,6 +6,7 @@ namespace cloud_mqtt {
 
 void begin();
 void setActive(bool active);
+void poll();
 void taskLoop();
 bool enqueueEcg(const EcgSample& sample);
 bool enqueuePpg(const PpgSample& sample);

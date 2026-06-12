@@ -16,10 +16,6 @@
 namespace {
 
 esp_mqtt_client_handle_t g_mqttClient = nullptr;
-QueueHandle_t g_ecgMqttQueue = nullptr;
-QueueHandle_t g_ppgMqttQueue = nullptr;
-QueueHandle_t g_imuMqttQueue = nullptr;
-QueueHandle_t g_tempMqttQueue = nullptr;
 
 char g_clientId[48] = {};
 uint32_t g_metricsSeq = 0;
@@ -28,11 +24,15 @@ uint32_t g_ppgSeq = 0;
 uint32_t g_imuSeq = 0;
 uint32_t g_tempSeq = 0;
 uint32_t g_lastWifiRetryMs = 0;
+uint32_t g_lastMqttStartAttemptMs = 0;
 uint32_t g_lastDiagPublishMs = 0;
+uint32_t g_lastNetPollLogMs = 0;
 bool g_active = false;
 bool g_wifiConnectInProgress = false;
 bool g_mqttClientStarted = false;
 volatile bool g_mqttConnected = false;
+volatile bool g_publishOnlinePending = false;
+volatile bool g_publishDiagPending = false;
 uint32_t g_wifiConnectStartMs = 0;
 constexpr bool kDemoWifiMode = true;
 constexpr bool kDemoPublishRawWaveforms = !kDemoWifiMode;
@@ -53,32 +53,30 @@ uint32_t g_overwriteTemp = 0;
 uint32_t g_wifiReconnectCount = 0;
 uint32_t g_mqttPublishFailCount = 0;
 uint32_t g_mqttDisconnectCount = 0;
+uint32_t g_mqttErrorCount = 0;
 uint32_t g_mqttOutboxRejectCount = 0;
+int g_mqttLastErrorType = 0;
+int g_mqttLastConnectReturnCode = 0;
+int g_mqttLastSockErr = 0;
+int g_mqttLastTlsErr = 0;
 uint32_t g_lastPublishLatencyMs = 0;
 uint32_t g_ppgPressureDecimateCounter = 0;
 uint32_t g_imuPressureDecimateCounter = 0;
 uint32_t g_demoImuDecimateCounter = 0;
 
-constexpr uint32_t kEcgMqttQueueLen = 1024;
-constexpr uint32_t kPpgMqttQueueLen = 256;
-constexpr uint32_t kImuMqttQueueLen = 256;
-constexpr uint32_t kTempMqttQueueLen = 16;
-
-constexpr size_t kEcgBatchMax = 40;
-constexpr size_t kPpgBatchMax = 20;
+constexpr size_t kEcgBatchMax = 80;
+constexpr size_t kPpgBatchMax = 40;
 constexpr size_t kImuBatchMax = 4;
 constexpr size_t kTempBatchMax = 4;
-constexpr TickType_t kMqttTaskPeriodTicks = pdMS_TO_TICKS(20);
-constexpr uint8_t kPublishBurstsPerLoop = 1;
-constexpr uint8_t kPublishBurstsUnderPressure = 2;
 constexpr uint32_t kWifiConnectTimeoutMs = 20000;
-constexpr int kMqttOutboxPressureBytes = 12000;
-constexpr uint16_t kEcgQueueHighPressurePermille = 850;
-constexpr uint16_t kEcgQueueCriticalPressurePermille = 950;
-constexpr uint16_t kPpgQueueHighPressurePermille = 850;
-constexpr uint16_t kImuQueueHighPressurePermille = 800;
+constexpr uint32_t kMqttStartRetryIntervalMs = 3000;
+constexpr uint32_t kNetPollLogIntervalMs = 3000;
+constexpr int kEspMqttTaskStack = 6144;
+constexpr int kEspMqttTaskPriority = 2;
+constexpr int kMqttOutboxPressureBytes = 8192;
+constexpr uint16_t kOutboxHighPressurePermille = 850;
 
-constexpr size_t kMqttPayloadBuffer = 1400;
+constexpr size_t kMqttPayloadBuffer = 1024;
 constexpr bool kJsonPayloadEnabled = (MQTT_PAYLOAD_MODE == 0) || (MQTT_PAYLOAD_MODE == 2);
 constexpr bool kBinaryPayloadEnabled = (MQTT_PAYLOAD_MODE == 1) || (MQTT_PAYLOAD_MODE == 2);
 
@@ -104,28 +102,14 @@ char g_topicWaveBinPpgFiltered[96] = {};
 char g_topicTemperature[96] = {};
 char g_topicWaveBinTemp[96] = {};
 
-template <typename T>
-bool enqueueDroppingOldest(QueueHandle_t queue, const T& sample, bool* overwrote) {
-  if (queue == nullptr) {
-    return false;
-  }
-
-  if (overwrote != nullptr) {
-    *overwrote = false;
-  }
-
-  if (xQueueSend(queue, &sample, 0) == pdPASS) {
-    return true;
-  }
-
-  T oldSample{};
-  (void)xQueueReceive(queue, &oldSample, 0);
-  const bool ok = (xQueueSend(queue, &sample, 0) == pdPASS);
-  if (ok && overwrote != nullptr) {
-    *overwrote = true;
-  }
-  return ok;
-}
+EcgSample g_ecgBatch[kEcgBatchMax] = {};
+PpgSample g_ppgBatch[kPpgBatchMax] = {};
+ImuSample g_imuBatch[kImuBatchMax] = {};
+TemperatureSample g_tempBatch[kTempBatchMax] = {};
+size_t g_ecgBatchCount = 0;
+size_t g_ppgBatchCount = 0;
+size_t g_imuBatchCount = 0;
+size_t g_tempBatchCount = 0;
 
 void appendU16Le(uint8_t* dst, const uint16_t v) {
   dst[0] = static_cast<uint8_t>(v & 0xFFU);
@@ -189,12 +173,16 @@ void finishBio2Frame(uint8_t* payload, const size_t payloadOffset, const size_t 
   appendU32Le(&payload[15], crc32(payload + payloadOffset, payloadLen));
 }
 
-uint16_t queueFillPermille(QueueHandle_t queue, const uint32_t queueLen) {
-  if (queue == nullptr || queueLen == 0) {
+uint16_t outboxFillPermille() {
+  if (g_mqttClient == nullptr || kMqttOutboxPressureBytes <= 0) {
     return 0;
   }
-  const uint32_t waiting = static_cast<uint32_t>(uxQueueMessagesWaiting(queue));
-  return static_cast<uint16_t>((waiting * 1000U) / queueLen);
+  const int bytes = esp_mqtt_client_get_outbox_size(g_mqttClient);
+  if (bytes <= 0) {
+    return 0;
+  }
+  return static_cast<uint16_t>((static_cast<uint32_t>(bytes) * 1000U) /
+                               static_cast<uint32_t>(kMqttOutboxPressureBytes));
 }
 
 bool publishTextTracked(const char* topic, const char* payload, bool retained) {
@@ -257,19 +245,6 @@ bool publishBinaryTracked(const char* topic, const uint8_t* payload, const size_
     return false;
   }
   return true;
-}
-
-template <typename T>
-size_t dequeueBatch(QueueHandle_t queue, T* batch, const size_t batchMax) {
-  if (queue == nullptr || batch == nullptr || batchMax == 0) {
-    return 0;
-  }
-
-  size_t n = 0;
-  while (n < batchMax && xQueueReceive(queue, &batch[n], 0) == pdPASS) {
-    ++n;
-  }
-  return n;
 }
 
 void buildClientId() {
@@ -362,6 +337,23 @@ void publishOnlineStatus() {
   (void)publishTextTracked(g_topicStatus, onlinePayload, true);
 }
 
+void publishDeferredConnectTelemetry() {
+  if (!g_mqttConnected) {
+    return;
+  }
+
+  if (g_publishOnlinePending) {
+    g_publishOnlinePending = false;
+    publishOnlineStatus();
+    g_publishDiagPending = true;
+  }
+
+  if (g_publishDiagPending) {
+    g_publishDiagPending = false;
+    g_lastDiagPublishMs = 0;
+  }
+}
+
 void resetCounters() {
   g_dropEcg = 0;
   g_dropPpg = 0;
@@ -373,7 +365,12 @@ void resetCounters() {
   g_overwriteTemp = 0;
   g_mqttPublishFailCount = 0;
   g_mqttDisconnectCount = 0;
+  g_mqttErrorCount = 0;
   g_mqttOutboxRejectCount = 0;
+  g_mqttLastErrorType = 0;
+  g_mqttLastConnectReturnCode = 0;
+  g_mqttLastSockErr = 0;
+  g_mqttLastTlsErr = 0;
   g_wifiReconnectCount = 0;
   g_ppgPressureDecimateCounter = 0;
   g_imuPressureDecimateCounter = 0;
@@ -410,7 +407,7 @@ void handleControlPayload(const char* payload) {
     return;
   }
   if (textContains(payload, "ping")) {
-    publishDiagTelemetry();
+    g_publishDiagPending = true;
     return;
   }
   if (textContains(payload, "reset_dsp_state")) {
@@ -477,10 +474,10 @@ void onMqttEvent(void* /*handlerArgs*/, esp_event_base_t /*base*/, int32_t event
   switch (eventId) {
     case MQTT_EVENT_CONNECTED:
       g_mqttConnected = true;
+      g_publishOnlinePending = true;
+      g_publishDiagPending = true;
       data_logger::logStatus("[NET] MQTT connected.");
       (void)esp_mqtt_client_subscribe(g_mqttClient, g_topicControl, 1);
-      publishOnlineStatus();
-      publishDiagTelemetry();
       break;
     case MQTT_EVENT_DISCONNECTED:
       g_mqttConnected = false;
@@ -491,7 +488,23 @@ void onMqttEvent(void* /*handlerArgs*/, esp_event_base_t /*base*/, int32_t event
       handleMqttData(event);
       break;
     case MQTT_EVENT_ERROR:
-      data_logger::logStatus("[NET] MQTT event error.");
+      ++g_mqttErrorCount;
+      if (event != nullptr && event->error_handle != nullptr) {
+        g_mqttLastErrorType = static_cast<int>(event->error_handle->error_type);
+        g_mqttLastConnectReturnCode = static_cast<int>(event->error_handle->connect_return_code);
+        g_mqttLastSockErr = event->error_handle->esp_transport_sock_errno;
+        g_mqttLastTlsErr = static_cast<int>(event->error_handle->esp_tls_last_esp_err);
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "[NET] MQTT error type=%d rc=%d sock=%d tls=0x%x",
+                 g_mqttLastErrorType,
+                 g_mqttLastConnectReturnCode,
+                 g_mqttLastSockErr,
+                 g_mqttLastTlsErr);
+        data_logger::logStatus(msg);
+      } else {
+        data_logger::logStatus("[NET] MQTT event error.");
+      }
       break;
     default:
       break;
@@ -684,15 +697,66 @@ bool ensureMqttStarted() {
     return false;
   }
 
+  const uint32_t nowMs = millis();
+  if ((nowMs - g_lastMqttStartAttemptMs) < kMqttStartRetryIntervalMs) {
+    return false;
+  }
+  g_lastMqttStartAttemptMs = nowMs;
+
   const esp_err_t err = esp_mqtt_client_start(g_mqttClient);
   if (err != ESP_OK) {
     ++g_mqttPublishFailCount;
-    data_logger::logStatus("[NET] MQTT start failed.");
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "[NET] MQTT start failed err=0x%x heap=%lu",
+             static_cast<unsigned>(err),
+             static_cast<unsigned long>(ESP.getFreeHeap()));
+    data_logger::logStatus(msg);
     return false;
   }
   g_mqttClientStarted = true;
   data_logger::logStatus("[NET] MQTT async client started.");
   return false;
+}
+
+bool ensureAsyncReady() {
+  if (!g_active) {
+    return false;
+  }
+  const bool wifiReady = ensureWifiConnected();
+  const bool mqttReady = wifiReady && ensureMqttStarted();
+  if (wifiReady && mqttReady) {
+    publishDeferredConnectTelemetry();
+    publishDiagTelemetry();
+    return true;
+  }
+  return false;
+}
+
+void pollNetwork() {
+  if (!g_active) {
+    return;
+  }
+  const bool wifiReady = ensureWifiConnected();
+  const bool mqttReady = wifiReady && ensureMqttStarted();
+  if (wifiReady && mqttReady) {
+    publishDeferredConnectTelemetry();
+    publishDiagTelemetry();
+    return;
+  }
+
+  const uint32_t nowMs = millis();
+  if ((nowMs - g_lastNetPollLogMs) >= kNetPollLogIntervalMs) {
+    g_lastNetPollLogMs = nowMs;
+    char msg[128];
+    snprintf(msg, sizeof(msg),
+             "[NET] poll wifi=%d mqttStarted=%u mqttConnected=%u heap=%lu",
+             static_cast<int>(WiFi.status()),
+             g_mqttClientStarted ? 1U : 0U,
+             g_mqttConnected ? 1U : 0U,
+             static_cast<unsigned long>(ESP.getFreeHeap()));
+    data_logger::logStatus(msg);
+  }
 }
 
 void publishDiagTelemetry() {
@@ -702,10 +766,10 @@ void publishDiagTelemetry() {
   }
   g_lastDiagPublishMs = nowMs;
 
-  const uint32_t qEcg = (g_ecgMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_ecgMqttQueue));
-  const uint32_t qPpg = (g_ppgMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_ppgMqttQueue));
-  const uint32_t qImu = (g_imuMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_imuMqttQueue));
-  const uint32_t qTemp = (g_tempMqttQueue == nullptr) ? 0 : static_cast<uint32_t>(uxQueueMessagesWaiting(g_tempMqttQueue));
+  const uint32_t qEcg = static_cast<uint32_t>(g_ecgBatchCount);
+  const uint32_t qPpg = static_cast<uint32_t>(g_ppgBatchCount);
+  const uint32_t qImu = static_cast<uint32_t>(g_imuBatchCount);
+  const uint32_t qTemp = static_cast<uint32_t>(g_tempBatchCount);
   const signal_dsp::DspMetrics dsp = signal_dsp::metrics();
   const uint32_t tempCrcFails = m601_temp::crcFailCount();
   const uint32_t tempBusFails = m601_temp::busFailCount();
@@ -718,7 +782,9 @@ void publishDiagTelemetry() {
            "\"ecgQueueLen\":%lu,\"ppgQueueLen\":%lu,\"imuQueueLen\":%lu,"
            "\"tempQueueLen\":%lu,"
            "\"ecgDropCount\":%lu,\"ppgDropCount\":%lu,\"imuDropCount\":%lu,\"tempDropCount\":%lu,"
-           "\"mqttPublishFailCount\":%lu,\"mqttDisconnectCount\":%lu,\"mqttOutboxRejectCount\":%lu,"
+           "\"mqttPublishFailCount\":%lu,\"mqttDisconnectCount\":%lu,\"mqttErrorCount\":%lu,"
+           "\"mqttOutboxRejectCount\":%lu,\"mqttLastErrorType\":%d,\"mqttLastConnectReturnCode\":%d,"
+           "\"mqttLastSockErr\":%d,\"mqttLastTlsErr\":%d,"
            "\"mqttOutboxBytes\":%d,\"mqttConnected\":%s,\"wifiReconnectCount\":%lu,"
            "\"tempCrcFailCount\":%lu,\"tempBusFailCount\":%lu,\"tempStatusFlags\":%u,"
            "\"rssi\":%ld,\"heapFree\":%lu,\"lastPublishLatencyMs\":%lu,"
@@ -739,7 +805,12 @@ void publishDiagTelemetry() {
            static_cast<unsigned long>(g_dropTemp),
            static_cast<unsigned long>(g_mqttPublishFailCount),
            static_cast<unsigned long>(g_mqttDisconnectCount),
+           static_cast<unsigned long>(g_mqttErrorCount),
            static_cast<unsigned long>(g_mqttOutboxRejectCount),
+           g_mqttLastErrorType,
+           g_mqttLastConnectReturnCode,
+           g_mqttLastSockErr,
+           g_mqttLastTlsErr,
            mqttOutboxBytes,
            g_mqttConnected ? "true" : "false",
            static_cast<unsigned long>(g_wifiReconnectCount),
@@ -764,14 +835,8 @@ void publishDiagTelemetry() {
   (void)publishTextTracked(g_topicMetrics, payload, false);
 }
 
-void publishEcgSamples() {
-  if (g_ecgMqttQueue == nullptr) {
-    return;
-  }
-
-  EcgSample batch[kEcgBatchMax];
-  const size_t n = dequeueBatch(g_ecgMqttQueue, batch, kEcgBatchMax);
-  if (n == 0) {
+void publishEcgBatch(const EcgSample* batch, const size_t n) {
+  if (batch == nullptr || n == 0) {
     return;
   }
 
@@ -842,14 +907,8 @@ void publishEcgSamples() {
   }
 }
 
-void publishPpgSamples() {
-  if (g_ppgMqttQueue == nullptr) {
-    return;
-  }
-
-  PpgSample batch[kPpgBatchMax];
-  const size_t n = dequeueBatch(g_ppgMqttQueue, batch, kPpgBatchMax);
-  if (n == 0) {
+void publishPpgBatch(const PpgSample* batch, const size_t n) {
+  if (batch == nullptr || n == 0) {
     return;
   }
 
@@ -931,14 +990,8 @@ void publishPpgSamples() {
   }
 }
 
-void publishImuSamples() {
-  if (g_imuMqttQueue == nullptr) {
-    return;
-  }
-
-  ImuSample batch[kImuBatchMax];
-  const size_t n = dequeueBatch(g_imuMqttQueue, batch, kImuBatchMax);
-  if (n == 0) {
+void publishImuBatch(const ImuSample* batch, const size_t n) {
+  if (batch == nullptr || n == 0) {
     return;
   }
 
@@ -1006,14 +1059,8 @@ void publishImuSamples() {
   }
 }
 
-void publishTemperatureSamples() {
-  if (g_tempMqttQueue == nullptr) {
-    return;
-  }
-
-  TemperatureSample batch[kTempBatchMax];
-  const size_t n = dequeueBatch(g_tempMqttQueue, batch, kTempBatchMax);
-  if (n == 0) {
+void publishTemperatureBatch(const TemperatureSample* batch, const size_t n) {
+  if (batch == nullptr || n == 0) {
     return;
   }
 
@@ -1097,34 +1144,6 @@ void begin() {
   WiFi.setSleep(WIFI_PS_NONE);
   WiFi.setAutoReconnect(true);
 
-  if (g_ecgMqttQueue == nullptr) {
-    g_ecgMqttQueue = xQueueCreate(kEcgMqttQueueLen, sizeof(EcgSample));
-    if (g_ecgMqttQueue == nullptr) {
-      data_logger::logStatus("[NET] ECG MQTT queue create failed.");
-    }
-  }
-
-  if (g_ppgMqttQueue == nullptr) {
-    g_ppgMqttQueue = xQueueCreate(kPpgMqttQueueLen, sizeof(PpgSample));
-    if (g_ppgMqttQueue == nullptr) {
-      data_logger::logStatus("[NET] PPG MQTT queue create failed.");
-    }
-  }
-
-  if (g_imuMqttQueue == nullptr) {
-    g_imuMqttQueue = xQueueCreate(kImuMqttQueueLen, sizeof(ImuSample));
-    if (g_imuMqttQueue == nullptr) {
-      data_logger::logStatus("[NET] IMU MQTT queue create failed.");
-    }
-  }
-
-  if (g_tempMqttQueue == nullptr) {
-    g_tempMqttQueue = xQueueCreate(kTempMqttQueueLen, sizeof(TemperatureSample));
-    if (g_tempMqttQueue == nullptr) {
-      data_logger::logStatus("[NET] temperature MQTT queue create failed.");
-    }
-  }
-
   if (g_mqttClient == nullptr) {
     esp_mqtt_client_config_t mqttConfig = {};
 #if ESP_IDF_VERSION_MAJOR >= 5
@@ -1134,8 +1153,8 @@ void begin() {
     mqttConfig.network.disable_auto_reconnect = false;
     mqttConfig.network.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
     mqttConfig.network.timeout_ms = 2000;
-    mqttConfig.task.stack_size = 6144;
-    mqttConfig.task.priority = MQTT_TASK_PRIORITY;
+    mqttConfig.task.stack_size = kEspMqttTaskStack;
+    mqttConfig.task.priority = kEspMqttTaskPriority;
     mqttConfig.buffer.size = kMqttPayloadBuffer + 64;
     mqttConfig.buffer.out_size = kMqttPayloadBuffer + 64;
 #else
@@ -1145,8 +1164,8 @@ void begin() {
     mqttConfig.disable_auto_reconnect = false;
     mqttConfig.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
     mqttConfig.network_timeout_ms = 2000;
-    mqttConfig.task_stack = 6144;
-    mqttConfig.task_prio = MQTT_TASK_PRIORITY;
+    mqttConfig.task_stack = kEspMqttTaskStack;
+    mqttConfig.task_prio = kEspMqttTaskPriority;
     mqttConfig.buffer_size = kMqttPayloadBuffer + 64;
     mqttConfig.out_buffer_size = kMqttPayloadBuffer + 64;
 #endif
@@ -1156,7 +1175,7 @@ void begin() {
       data_logger::logStatus("[NET] MQTT async client init failed.");
     } else {
       (void)esp_mqtt_client_register_event(g_mqttClient,
-                                           static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID),
+                                           MQTT_EVENT_ANY,
                                            onMqttEvent,
                                            nullptr);
     }
@@ -1188,6 +1207,8 @@ void setActive(const bool active) {
     g_wifiConnectInProgress = true;
     g_wifiConnectStartMs = millis();
     g_lastWifiRetryMs = g_wifiConnectStartMs;
+    g_lastMqttStartAttemptMs = 0;
+    g_lastNetPollLogMs = 0;
     data_logger::logStatus("[NET] WiFi/MQTT output active.");
   } else {
     if (g_mqttClient != nullptr && g_mqttClientStarted) {
@@ -1199,23 +1220,23 @@ void setActive(const bool active) {
     }
     g_mqttClientStarted = false;
     g_mqttConnected = false;
+    g_publishOnlinePending = false;
+    g_publishDiagPending = false;
+    g_lastMqttStartAttemptMs = 0;
+    g_lastNetPollLogMs = 0;
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_OFF);
-    if (g_ecgMqttQueue != nullptr) {
-      xQueueReset(g_ecgMqttQueue);
-    }
-    if (g_ppgMqttQueue != nullptr) {
-      xQueueReset(g_ppgMqttQueue);
-    }
-    if (g_imuMqttQueue != nullptr) {
-      xQueueReset(g_imuMqttQueue);
-    }
-    if (g_tempMqttQueue != nullptr) {
-      xQueueReset(g_tempMqttQueue);
-    }
+    g_ecgBatchCount = 0;
+    g_ppgBatchCount = 0;
+    g_imuBatchCount = 0;
+    g_tempBatchCount = 0;
     g_wifiConnectInProgress = false;
     data_logger::logStatus("[NET] WiFi/MQTT output inactive.");
   }
+}
+
+void poll() {
+  pollNetwork();
 }
 
 bool enqueueEcg(const EcgSample& sample) {
@@ -1225,19 +1246,19 @@ bool enqueueEcg(const EcgSample& sample) {
   if (!g_enableEcg) {
     return true;
   }
-  if (g_ecgMqttQueue == nullptr) {
-    return false;
-  }
-  bool overwrote = false;
-  if (enqueueDroppingOldest(g_ecgMqttQueue, sample, &overwrote)) {
-    if (overwrote) {
-      ++g_overwriteEcg;
-      ++g_dropEcg;
-    }
+  if (!ensureAsyncReady()) {
     return true;
   }
-  ++g_dropEcg;
-  return false;
+  if (outboxFillPermille() >= kOutboxHighPressurePermille) {
+    ++g_dropEcg;
+    return true;
+  }
+  g_ecgBatch[g_ecgBatchCount++] = sample;
+  if (g_ecgBatchCount >= kEcgBatchMax) {
+    publishEcgBatch(g_ecgBatch, g_ecgBatchCount);
+    g_ecgBatchCount = 0;
+  }
+  return true;
 }
 
 bool enqueuePpg(const PpgSample& sample) {
@@ -1247,35 +1268,28 @@ bool enqueuePpg(const PpgSample& sample) {
   if (!g_enablePpg) {
     return true;
   }
-  if (g_ppgMqttQueue == nullptr) {
-    return false;
+  if (!ensureAsyncReady()) {
+    return true;
   }
-
-  const uint16_t ecgPressure = queueFillPermille(g_ecgMqttQueue, kEcgMqttQueueLen);
-  if (ecgPressure >= kEcgQueueCriticalPressurePermille) {
+  if (outboxFillPermille() >= kOutboxHighPressurePermille) {
     ++g_dropPpg;
-    return false;
+    return true;
   }
 
-  const uint16_t ppgPressure = queueFillPermille(g_ppgMqttQueue, kPpgMqttQueueLen);
-  if (ppgPressure >= kPpgQueueHighPressurePermille) {
+  if (g_ecgBatchCount >= (kEcgBatchMax * 3U / 4U)) {
     ++g_ppgPressureDecimateCounter;
     if ((g_ppgPressureDecimateCounter & 0x01U) == 0U) {
       ++g_dropPpg;
-      return false;
+      return true;
     }
   }
 
-  bool overwrote = false;
-  if (enqueueDroppingOldest(g_ppgMqttQueue, sample, &overwrote)) {
-    if (overwrote) {
-      ++g_overwritePpg;
-      ++g_dropPpg;
-    }
-    return true;
+  g_ppgBatch[g_ppgBatchCount++] = sample;
+  if (g_ppgBatchCount >= kPpgBatchMax) {
+    publishPpgBatch(g_ppgBatch, g_ppgBatchCount);
+    g_ppgBatchCount = 0;
   }
-  ++g_dropPpg;
-  return false;
+  return true;
 }
 
 bool enqueueImu(const ImuSample& sample) {
@@ -1291,41 +1305,21 @@ bool enqueueImu(const ImuSample& sample) {
   if (!g_enableImu) {
     return true;
   }
-  if (g_imuMqttQueue == nullptr) {
-    return false;
-  }
-
-  const uint16_t ecgPressure = queueFillPermille(g_ecgMqttQueue, kEcgMqttQueueLen);
-  if (ecgPressure >= kEcgQueueHighPressurePermille) {
-    ++g_dropImu;
-    return false;
-  }
-
-  const uint16_t ppgPressure = queueFillPermille(g_ppgMqttQueue, kPpgMqttQueueLen);
-  if (ppgPressure >= kPpgQueueHighPressurePermille) {
-    ++g_dropImu;
-    return false;
-  }
-
-  const uint16_t imuPressure = queueFillPermille(g_imuMqttQueue, kImuMqttQueueLen);
-  if (imuPressure >= kImuQueueHighPressurePermille) {
-    ++g_imuPressureDecimateCounter;
-    if ((g_imuPressureDecimateCounter % 3U) != 0U) {
-      ++g_dropImu;
-      return false;
-    }
-  }
-
-  bool overwrote = false;
-  if (enqueueDroppingOldest(g_imuMqttQueue, sample, &overwrote)) {
-    if (overwrote) {
-      ++g_overwriteImu;
-      ++g_dropImu;
-    }
+  if (!ensureAsyncReady()) {
     return true;
   }
-  ++g_dropImu;
-  return false;
+  if (outboxFillPermille() >= kOutboxHighPressurePermille ||
+      g_ecgBatchCount >= (kEcgBatchMax / 2U)) {
+    ++g_dropImu;
+    return true;
+  }
+
+  g_imuBatch[g_imuBatchCount++] = sample;
+  if (g_imuBatchCount >= kImuBatchMax) {
+    publishImuBatch(g_imuBatch, g_imuBatchCount);
+    g_imuBatchCount = 0;
+  }
+  return true;
 }
 
 bool enqueueTemperature(const TemperatureSample& sample) {
@@ -1335,48 +1329,22 @@ bool enqueueTemperature(const TemperatureSample& sample) {
   if (!g_enableTemp) {
     return true;
   }
-  if (g_tempMqttQueue == nullptr) {
-    return false;
-  }
-
-  bool overwrote = false;
-  if (enqueueDroppingOldest(g_tempMqttQueue, sample, &overwrote)) {
-    if (overwrote) {
-      ++g_overwriteTemp;
-      ++g_dropTemp;
-    }
+  if (!ensureAsyncReady()) {
     return true;
   }
-  ++g_dropTemp;
-  return false;
+  if (outboxFillPermille() >= kOutboxHighPressurePermille) {
+    ++g_dropTemp;
+    return true;
+  }
+  g_tempBatch[g_tempBatchCount++] = sample;
+  publishTemperatureBatch(g_tempBatch, g_tempBatchCount);
+  g_tempBatchCount = 0;
+  return true;
 }
 
 void taskLoop() {
-  TickType_t lastWake = xTaskGetTickCount();
-
   for (;;) {
-    if (!g_active) {
-      vTaskDelayUntil(&lastWake, kMqttTaskPeriodTicks);
-      continue;
-    }
-
-    const bool wifiReady = ensureWifiConnected();
-    const bool mqttReady = wifiReady && ensureMqttStarted();
-    if (wifiReady && mqttReady) {
-      publishDiagTelemetry();
-      const bool queuePressure =
-          queueFillPermille(g_ecgMqttQueue, kEcgMqttQueueLen) >= 500 ||
-          queueFillPermille(g_ppgMqttQueue, kPpgMqttQueueLen) >= 500;
-      const uint8_t bursts = queuePressure ? kPublishBurstsUnderPressure : kPublishBurstsPerLoop;
-      for (uint8_t burst = 0; burst < bursts; ++burst) {
-        publishEcgSamples();
-        publishPpgSamples();
-        publishImuSamples();
-        publishTemperatureSamples();
-      }
-    }
-
-    vTaskDelayUntil(&lastWake, kMqttTaskPeriodTicks);
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
 

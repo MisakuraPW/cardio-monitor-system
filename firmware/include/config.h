@@ -41,10 +41,10 @@ constexpr bool OUTPUT_MODE_SWITCH_USE_PULLUP = true;
 constexpr bool OUTPUT_MODE_SWITCH_HIGH_SELECTS_WIFI = true;
 
 // Queues
-constexpr uint32_t ECG_QUEUE_LEN = 1024;
-constexpr uint32_t PPG_QUEUE_LEN = 512;
-constexpr uint32_t IMU_QUEUE_LEN = 512;
-constexpr uint32_t TEMP_QUEUE_LEN = 16;
+constexpr uint32_t ECG_QUEUE_LEN = 512;
+constexpr uint32_t PPG_QUEUE_LEN = 256;
+constexpr uint32_t IMU_QUEUE_LEN = 64;
+constexpr uint32_t TEMP_QUEUE_LEN = 8;
 
 // Task stack sizes
 constexpr uint32_t ECG_TASK_STACK = 4096;
@@ -64,7 +64,7 @@ constexpr UBaseType_t UART_TASK_PRIORITY = 1;
 constexpr UBaseType_t MQTT_TASK_PRIORITY = 3;
 
 // UART
-constexpr uint32_t DEBUG_BAUDRATE = 921600;
+constexpr uint32_t DEBUG_BAUDRATE = 115200;
 
 // BLE (NimBLE)
 constexpr uint32_t BLE_TASK_STACK = 6144;
@@ -94,7 +94,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_SERIAL_LOGGER
-#define ENABLE_SERIAL_LOGGER 0  // 1 = print text logs to serial, 0 = disable
+#define ENABLE_SERIAL_LOGGER 1  // 1 = print text logs to serial, 0 = disable
 #endif
 
 #ifndef ENABLE_ECG_OUTPUT
@@ -106,11 +106,11 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_IMU_OUTPUT
-#define ENABLE_IMU_OUTPUT 1
+#define ENABLE_IMU_OUTPUT 0
 #endif
 
 #ifndef ENABLE_TEMP_OUTPUT
-#define ENABLE_TEMP_OUTPUT 1
+#define ENABLE_TEMP_OUTPUT 0
 #endif
 
 // Logger format:
@@ -125,11 +125,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_TEXT_STATUS
-#if LOGGER_OUTPUT_MODE == 2
-#define ENABLE_TEXT_STATUS 0
-#else
 #define ENABLE_TEXT_STATUS 1
-#endif
 #endif
 
 // Cloud connectivity (WiFi + MQTT)
@@ -142,7 +138,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef MQTT_BROKER_HOST
-#define MQTT_BROKER_HOST "182.254.220.56"
+#define MQTT_BROKER_HOST "broker.hivemq.com"  //"182.254.220.56"
 #endif
 
 #ifndef MQTT_BROKER_PORT

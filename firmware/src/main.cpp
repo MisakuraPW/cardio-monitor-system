@@ -60,12 +60,12 @@ constexpr bool kEnableUartStream = (ENABLE_UART_OUTPUT == 1);
 constexpr bool kEnableWifiOutput = (ENABLE_WIFI_OUTPUT == 1);
 constexpr bool kEnableBleOutput = (ENABLE_BLE_OUTPUT == 1);
 constexpr bool kEnableImuOutput = (ENABLE_IMU_OUTPUT == 1);
+constexpr bool kEnableTempOutput = (ENABLE_TEMP_OUTPUT == 1);
 
 uint32_t g_ecgDropCount = 0;
 bool g_useWifiOutput = false;
 bool g_useBleOutput = false;
 volatile bool g_outputModeIrqPending = true;
-TaskHandle_t g_mqttTaskHandle = nullptr;
 TaskHandle_t g_bleTaskHandle = nullptr;
 
 enum class OutputMode : uint8_t {
@@ -252,6 +252,9 @@ void emitImu(const ImuSample& s) {
 }
 
 void emitTemperature(const TemperatureSample& s) {
+  if (!kEnableTempOutput) {
+    return;
+  }
   if (g_useWifiOutput) {
     (void)cloud_mqtt::enqueueTemperature(s);
   }
@@ -473,14 +476,16 @@ void packetizerTask(void* /*pvParameters*/) {
       }
     }
 
-    TemperatureSample temp{};
-    for (size_t i = 0; i < kPacketizerTempBatch; ++i) {
-      if (xQueueReceive(g_tempQueue, &temp, 0) != pdPASS) {
-        break;
+    if (kEnableTempOutput && g_tempQueue != nullptr) {
+      TemperatureSample temp{};
+      for (size_t i = 0; i < kPacketizerTempBatch; ++i) {
+        if (xQueueReceive(g_tempQueue, &temp, 0) != pdPASS) {
+          break;
+        }
+        emitTemperature(temp);
+        didWork = true;
+        ++processed;
       }
-      emitTemperature(temp);
-      didWork = true;
-      ++processed;
     }
 
     if (!didWork) {
@@ -507,10 +512,6 @@ void uartTxTask(void* /*pvParameters*/) {
       }
     }
   }
-}
-
-void mqttTask(void* /*pvParameters*/) {
-  cloud_mqtt::taskLoop();
 }
 
 void bleTask(void* /*pvParameters*/) {
@@ -549,12 +550,6 @@ bool startMqttTaskIfNeeded() {
   }
   if (!g_mqttStarted) {
     cloud_mqtt::begin();
-    if (xTaskCreatePinnedToCore(mqttTask, "mqtt_task", 6144, nullptr,
-                                MQTT_TASK_PRIORITY, &g_mqttTaskHandle, 1) != pdPASS) {
-      data_logger::logStatus(F("MQTT task creation failed."));
-      g_mqttTaskHandle = nullptr;
-      return false;
-    }
     g_mqttStarted = true;
   }
   return true;
@@ -630,8 +625,15 @@ void applyOutputMode(const OutputMode requestedMode) {
 
 void outputModeControlTask(void* /*pvParameters*/) {
   TickType_t lastHandledTick = 0;
+  TickType_t lastPollTick = 0;
 
   for (;;) {
+    const TickType_t nowTick = xTaskGetTickCount();
+    if (g_useWifiOutput && (nowTick - lastPollTick) >= pdMS_TO_TICKS(250)) {
+      lastPollTick = nowTick;
+      cloud_mqtt::poll();
+    }
+
     if (!g_outputModeIrqPending) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
@@ -654,7 +656,7 @@ void createQueues() {
   g_ecgQueue = xQueueCreate(ECG_QUEUE_LEN, sizeof(EcgSample));
   g_ppgQueue = xQueueCreate(PPG_QUEUE_LEN, sizeof(PpgSample));
   g_imuQueue = xQueueCreate(IMU_QUEUE_LEN, sizeof(ImuSample));
-  g_tempQueue = xQueueCreate(TEMP_QUEUE_LEN, sizeof(TemperatureSample));
+  g_tempQueue = kEnableTempOutput ? xQueueCreate(TEMP_QUEUE_LEN, sizeof(TemperatureSample)) : nullptr;
   if (kEnableUartStream) {
     g_uartTxQueue = xQueueCreate(256, sizeof(TxPacket));
   } else {
@@ -677,9 +679,11 @@ void createTasks() {
                               IMU_TASK_PRIORITY, nullptr, 0) != pdPASS) {
     taskCreateFailed = true;
   }
-  if (xTaskCreatePinnedToCore(tempTask, "temp_task", TEMP_TASK_STACK, nullptr,
-                              TEMP_TASK_PRIORITY, nullptr, 0) != pdPASS) {
-    taskCreateFailed = true;
+  if (kEnableTempOutput) {
+    if (xTaskCreatePinnedToCore(tempTask, "temp_task", TEMP_TASK_STACK, nullptr,
+                                TEMP_TASK_PRIORITY, nullptr, 0) != pdPASS) {
+      taskCreateFailed = true;
+    }
   }
 
   if (kEnableWifiOutput || kEnableUartStream || kEnableBleOutput) {
@@ -726,7 +730,7 @@ void setup() {
   configureOutputModeSwitch();
   createQueues();
   if (g_ecgQueue == nullptr || g_ppgQueue == nullptr || g_imuQueue == nullptr ||
-      g_tempQueue == nullptr ||
+      (kEnableTempOutput && g_tempQueue == nullptr) ||
       (kEnableUartStream && g_uartTxQueue == nullptr)) {
     data_logger::logStatus(F("Queue creation failed."));
     while (true) {
@@ -736,7 +740,7 @@ void setup() {
 
   g_ppgOnline = bringUpPpg(false);
   g_imuOnline = bringUpImu(false);
-  g_tempOnline = bringUpTemp(false);
+  g_tempOnline = kEnableTempOutput ? bringUpTemp(false) : false;
 
   ecg_adc::begin();
   ecg_adc::start();
