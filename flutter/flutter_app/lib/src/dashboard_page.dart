@@ -1015,11 +1015,14 @@ class _DashboardPageState extends State<DashboardPage> {
                 Wrap(
                   spacing: 4,
                   runSpacing: 3,
-                  children: <Widget>[
-                    _MetricChip(label: 'pub fail', value: '${item.publishFailCount}'),
-                    _MetricChip(label: 'crc', value: '${item.crcErrorCount}'),
-                    _MetricChip(label: 'latency', value: '${item.lastPublishLatencyMs} ms'),
-                  ],
+                    children: <Widget>[
+                      _MetricChip(label: 'pub fail', value: '${item.publishFailCount}'),
+                      _MetricChip(label: 'mqtt disc', value: '${item.mqttDisconnectCount}'),
+                      _MetricChip(label: 'outbox', value: '${item.mqttOutboxBytes} B'),
+                      _MetricChip(label: 'out reject', value: '${item.mqttOutboxRejectCount}'),
+                      _MetricChip(label: 'crc', value: '${item.crcErrorCount}'),
+                      _MetricChip(label: 'latency', value: '${item.lastPublishLatencyMs} ms'),
+                    ],
                 ),
                 const SizedBox(height: 4),
               ],
