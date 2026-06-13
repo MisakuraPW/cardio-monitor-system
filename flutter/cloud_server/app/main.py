@@ -658,7 +658,7 @@ def _segment_to_csv(segment: SegmentDetail) -> str:
         writer.writerow(
             [
                 timestamp,
-                *[channel_maps[channel_key].get(timestamp, 0) for channel_key in channel_keys],
+                *[channel_maps[channel_key].get(timestamp, '') for channel_key in channel_keys],
             ]
         )
     return buffer.getvalue()

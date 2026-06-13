@@ -1307,9 +1307,11 @@ class FileReplayAdapter implements DataSourceAdapter {
     }
 
     final timestamps = <int>[];
+    final channelTimestamps = <String, List<int>>{};
     final columns = <String, List<double>>{};
     for (final String header in channelColumns.values) {
       columns[header] = <double>[];
+      channelTimestamps[header] = <int>[];
     }
 
     for (final String line in lines.skip(1)) {
@@ -1317,9 +1319,18 @@ class FileReplayAdapter implements DataSourceAdapter {
       if (parts.length != headers.length) {
         continue;
       }
-      timestamps.add(int.parse(parts[timestampIndex]));
+      final timestamp = int.parse(parts[timestampIndex]);
+      timestamps.add(timestamp);
       channelColumns.forEach((int index, String header) {
-        final value = double.tryParse(parts[index]) ?? 0;
+        final rawValue = parts[index].trim();
+        if (rawValue.isEmpty) {
+          return;
+        }
+        final value = double.tryParse(rawValue);
+        if (value == null || !value.isFinite) {
+          return;
+        }
+        channelTimestamps[header]!.add(timestamp);
         columns[header]!.add(value);
       });
     }
@@ -1333,14 +1344,19 @@ class FileReplayAdapter implements DataSourceAdapter {
     parsedChannels = <ChannelDescriptor>[];
     var colorIndex = 0;
     for (final entry in columns.entries) {
+      if (entry.value.isEmpty) {
+        continue;
+      }
       final normalized = _normalizeHeader(entry.key);
+      final seriesTimestamps = channelTimestamps[entry.key] ?? timestamps;
+      final inferredRate = _inferSampleRate(seriesTimestamps);
       parsedChannels = <ChannelDescriptor>[
         ...parsedChannels,
         ChannelDescriptor(
           key: normalized.key,
           label: normalized.label,
           unit: normalized.unit,
-          sampleRate: sampleRate,
+          sampleRate: inferredRate > 0 ? inferredRate : sampleRate,
           colorHex: _palette[colorIndex % _palette.length],
           enabled: true,
         ),
@@ -1352,6 +1368,7 @@ class FileReplayAdapter implements DataSourceAdapter {
       deviceId: 'file-device-${_uuid.v4().substring(0, 8)}',
       sessionId: 'file-session-${_uuid.v4().substring(0, 8)}',
       timestamps: timestamps,
+      channelTimestamps: channelTimestamps,
       columns: columns,
       channelDescriptors: parsedChannels,
     );
@@ -1397,6 +1414,7 @@ class FileReplayAdapter implements DataSourceAdapter {
     required String deviceId,
     required String sessionId,
     required List<int> timestamps,
+    required Map<String, List<int>> channelTimestamps,
     required Map<String, List<double>> columns,
     required List<ChannelDescriptor> channelDescriptors,
   }) {
@@ -1408,6 +1426,7 @@ class FileReplayAdapter implements DataSourceAdapter {
         (String item) => _normalizeHeader(item).key == descriptor.key,
       );
       final values = columns[key]!;
+      final seriesTimestamps = channelTimestamps[key] ?? timestamps;
       const batchSize = 10;
 
       for (var offset = 0; offset < values.length; offset += batchSize) {
@@ -1419,13 +1438,13 @@ class FileReplayAdapter implements DataSourceAdapter {
             deviceId: deviceId,
             sessionId: sessionId,
             seq: seq++,
-            timestampMs: timestamps[offset],
+            timestampMs: seriesTimestamps[offset],
             channelKey: descriptor.key,
             sampleRate: descriptor.sampleRate,
             unit: descriptor.unit,
             quality: 0.92,
             samples: values.sublist(offset, end),
-            sampleTimestampsMs: timestamps.sublist(offset, end),
+            sampleTimestampsMs: seriesTimestamps.sublist(offset, end),
           ),
         );
       }
@@ -1441,20 +1460,63 @@ class FileReplayAdapter implements DataSourceAdapter {
     return line.split(',').map((String item) => item.trim()).toList();
   }
 
-  _NormalizedChannel _normalizeHeader(String header) {
-    final segments =
-        header.split('_').where((String part) => part.isNotEmpty).toList();
-    if (segments.isEmpty) {
-      return const _NormalizedChannel(
-        key: 'channel',
-        label: 'CHANNEL',
-        unit: 'a.u.',
-      );
+  double _inferSampleRate(List<int> timestamps) {
+    if (timestamps.length < 2) {
+      return 0;
     }
-    final unit = segments.length > 1 ? segments.last : 'a.u.';
-    final key = segments.first.toLowerCase();
-    final label = segments.first.toUpperCase();
-    return _NormalizedChannel(key: key, label: label, unit: unit);
+    var totalDelta = 0;
+    var count = 0;
+    for (var index = 1; index < timestamps.length; index++) {
+      final delta = timestamps[index] - timestamps[index - 1];
+      if (delta > 0) {
+        totalDelta += delta;
+        count += 1;
+      }
+    }
+    if (count == 0 || totalDelta <= 0) {
+      return 0;
+    }
+    return 1000.0 / (totalDelta / count);
+  }
+
+  _NormalizedChannel _normalizeHeader(String header) {
+    final lower = header.trim().toLowerCase();
+    final compact = lower
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^_|_$'), '');
+    if (compact.isEmpty) {
+      return const _NormalizedChannel(key: 'channel', label: 'CHANNEL', unit: 'a.u.');
+    }
+
+    if (compact.contains('ecg_filtered')) {
+      return const _NormalizedChannel(key: 'ecg_filtered', label: 'ECG Filtered', unit: 'adc');
+    }
+    if (compact == 'ecg' || compact.startsWith('ecg_')) {
+      return const _NormalizedChannel(key: 'ecg', label: 'ECG', unit: 'adc');
+    }
+    if (compact.contains('ppg_ir_filtered') || compact.contains('ir_filtered')) {
+      return const _NormalizedChannel(key: 'ppg_ir_filtered', label: 'PPG IR Filtered', unit: 'count');
+    }
+    if (compact.contains('ppg_red_filtered') || compact.contains('red_filtered')) {
+      return const _NormalizedChannel(key: 'ppg_red_filtered', label: 'PPG RED Filtered', unit: 'count');
+    }
+    if (compact.contains('ppg_ir') || compact == 'ir') {
+      return const _NormalizedChannel(key: 'ppg_ir', label: 'PPG IR', unit: 'count');
+    }
+    if (compact.contains('ppg_red') || compact == 'red') {
+      return const _NormalizedChannel(key: 'ppg_red', label: 'PPG RED', unit: 'count');
+    }
+    if (compact == 'ppg' || compact.startsWith('ppg_')) {
+      return const _NormalizedChannel(key: 'ppg_ir', label: 'PPG IR', unit: 'count');
+    }
+    if (compact.startsWith('imu_')) {
+      return _NormalizedChannel(key: compact, label: compact.toUpperCase(), unit: 'raw');
+    }
+    if (compact == 'temp' || compact == 'temperature') {
+      return const _NormalizedChannel(key: 'temp', label: 'TEMP', unit: 'c');
+    }
+    return _NormalizedChannel(key: compact, label: compact.toUpperCase(), unit: 'a.u.');
   }
 
   void _emitStatus(AdapterState state, String message) {

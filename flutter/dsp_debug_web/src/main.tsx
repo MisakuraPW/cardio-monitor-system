@@ -43,13 +43,20 @@ const defaultParams: Params = {
 function App() {
   const [rows, setRows] = useState<Row[]>(demoRows())
   const [params, setParams] = useState<Params>(defaultParams)
+  const [viewSeconds, setViewSeconds] = useState(12)
+  const [viewStartRatio, setViewStartRatio] = useState(0)
   const result = useMemo(() => runDsp(rows, params), [rows, params])
+  const viewRange = useMemo(
+    () => buildViewRange(rows, viewSeconds, viewStartRatio),
+    [rows, viewSeconds, viewStartRatio],
+  )
   const exportedJson = JSON.stringify({ type: 'set_dsp_params', payload: params }, null, 2)
   const exportedCpp = toCpp(params)
 
   async function loadCsv(file: File) {
     const text = await file.text()
     setRows(parseCsv(text))
+    setViewStartRatio(0)
   }
 
   return (
@@ -84,10 +91,18 @@ function App() {
 
         <section className="panel charts">
           <MetricStrip rows={rows} result={result} />
-          <WaveChart title="ECG raw vs filtered" raw={rows.map((r) => r.ecg)} filtered={result.ecgFiltered} color="#d84b5f" />
-          <WaveChart title="PPG IR raw vs filtered" raw={rows.map((r) => r.ppgIr)} filtered={result.ppgIrFiltered} color="#247ba0" />
-          <WaveChart title="PPG RED raw vs filtered" raw={rows.map((r) => r.ppgRed)} filtered={result.ppgRedFiltered} color="#a94b5d" />
-          <WaveChart title="Motion reference" raw={result.motion} filtered={result.motion.map(() => params.motionThreshold)} color="#6d5dfc" />
+          <ViewControls
+            rows={rows}
+            range={viewRange}
+            viewSeconds={viewSeconds}
+            viewStartRatio={viewStartRatio}
+            onViewSecondsChange={setViewSeconds}
+            onViewStartRatioChange={setViewStartRatio}
+          />
+          <WaveChart title="ECG raw vs filtered" raw={rows.map((r) => r.ecg)} filtered={result.ecgFiltered} color="#d84b5f" range={viewRange} />
+          <WaveChart title="PPG IR raw vs filtered" raw={rows.map((r) => r.ppgIr)} filtered={result.ppgIrFiltered} color="#247ba0" range={viewRange} />
+          <WaveChart title="PPG RED raw vs filtered" raw={rows.map((r) => r.ppgRed)} filtered={result.ppgRedFiltered} color="#a94b5d" range={viewRange} />
+          <WaveChart title="Motion reference" raw={result.motion} filtered={result.motion.map(() => params.motionThreshold)} color="#6d5dfc" range={viewRange} sharedScale />
         </section>
 
         <section className="panel export">
@@ -111,9 +126,13 @@ function Slider(props: { label: string; value: number; min: number; max: number;
 }
 
 function MetricStrip({ rows, result }: { rows: Row[]; result: ReturnType<typeof runDsp> }) {
+  const durationSeconds = rows.length > 1
+    ? Math.max(0, (rows[rows.length - 1].t - rows[0].t) / 1000)
+    : 0
   return (
     <div className="metrics">
       <div><span>Samples</span><b>{rows.length}</b></div>
+      <div><span>Duration</span><b>{durationSeconds.toFixed(1)}s</b></div>
       <div><span>Motion max</span><b>{Math.max(...result.motion).toFixed(0)}</b></div>
       <div><span>ECG quality</span><b>{(result.ecgQuality * 100).toFixed(0)}%</b></div>
       <div><span>PPG quality</span><b>{(result.ppgQuality * 100).toFixed(0)}%</b></div>
@@ -121,15 +140,94 @@ function MetricStrip({ rows, result }: { rows: Row[]; result: ReturnType<typeof 
   )
 }
 
-function WaveChart({ title, raw, filtered, color }: { title: string; raw: number[]; filtered: number[]; color: string }) {
+type ViewRange = {
+  startIndex: number
+  endIndex: number
+  startMs: number
+  endMs: number
+  durationMs: number
+}
+
+function ViewControls(props: {
+  rows: Row[]
+  range: ViewRange
+  viewSeconds: number
+  viewStartRatio: number
+  onViewSecondsChange: (value: number) => void
+  onViewStartRatioChange: (value: number) => void
+}) {
+  const totalDurationSeconds = props.rows.length > 1
+    ? Math.max(0, (props.rows[props.rows.length - 1].t - props.rows[0].t) / 1000)
+    : 0
+  const baseMs = props.rows[0]?.t ?? 0
+  const canScroll = totalDurationSeconds > props.viewSeconds
+  const visibleSamples = Math.max(0, props.range.endIndex - props.range.startIndex)
+  return (
+    <div className="view-panel">
+      <div className="view-row">
+        <label>
+          <span>View window</span>
+          <b>{props.viewSeconds.toFixed(0)}s</b>
+          <input
+            type="range"
+            min={2}
+            max={Math.max(6, Math.min(120, Math.ceil(totalDurationSeconds || 60)))}
+            step={1}
+            value={props.viewSeconds}
+            onChange={(event) => props.onViewSecondsChange(Number(event.target.value))}
+          />
+        </label>
+        <label>
+          <span>Position</span>
+          <b>{formatSeconds(props.range.startMs - baseMs)} - {formatSeconds(props.range.endMs - baseMs)}</b>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.001}
+            value={props.viewStartRatio}
+            disabled={!canScroll}
+            onChange={(event) => props.onViewStartRatioChange(Number(event.target.value))}
+          />
+        </label>
+      </div>
+      <div className="view-actions">
+        <button type="button" onClick={() => props.onViewStartRatioChange(0)}>Start</button>
+        <button type="button" onClick={() => props.onViewStartRatioChange(Math.max(0, props.viewStartRatio - 0.1))}>Prev</button>
+        <button type="button" onClick={() => props.onViewStartRatioChange(Math.min(1, props.viewStartRatio + 0.1))}>Next</button>
+        <button type="button" onClick={() => props.onViewStartRatioChange(1)}>End</button>
+        <span>{visibleSamples} visible samples, {totalDurationSeconds.toFixed(1)}s total</span>
+      </div>
+    </div>
+  )
+}
+
+function WaveChart({
+  title,
+  raw,
+  filtered,
+  color,
+  range,
+  sharedScale = false,
+}: {
+  title: string
+  raw: number[]
+  filtered: number[]
+  color: string
+  range: ViewRange
+  sharedScale?: boolean
+}) {
   const width = 920
   const height = 180
-  const rawPath = toPath(raw, width, height)
-  const filteredPath = toPath(filtered, width, height)
+  const sharedScaleValues = sharedScale ? [...raw, ...filtered] : undefined
+  const rawPath = toPath(raw, width, height, range, sharedScaleValues)
+  const filteredPath = toPath(filtered, width, height, range, sharedScaleValues)
+  const visibleCount = Math.max(0, range.endIndex - range.startIndex)
   return (
     <div className="chart">
-      <h3>{title}</h3>
+      <h3><span>{title}</span><small>{visibleCount} samples</small></h3>
       <svg viewBox={`0 0 ${width} ${height}`} role="img">
+        <line x1="0" x2={width} y1={height / 2} y2={height / 2} stroke="#e4ebe6" strokeWidth="1" />
         <path d={rawPath} fill="none" stroke="#aeb9b3" strokeWidth="1.4" />
         <path d={filteredPath} fill="none" stroke={color} strokeWidth="2" />
       </svg>
@@ -137,58 +235,188 @@ function WaveChart({ title, raw, filtered, color }: { title: string; raw: number
   )
 }
 
-function toPath(values: number[], width: number, height: number) {
+function toPath(values: number[], width: number, height: number, range: ViewRange, scaleReference?: number[]) {
   if (values.length === 0) return ''
-  const sampled = downsample(values, 800)
-  const min = Math.min(...sampled)
-  const max = Math.max(...sampled)
-  const range = Math.max(1, max - min)
-  return sampled.map((value, index) => {
-    const x = (index / Math.max(1, sampled.length - 1)) * width
-    const y = height - ((value - min) / range) * (height - 14) - 7
+  const start = Math.max(0, Math.min(values.length, range.startIndex))
+  const end = Math.max(start, Math.min(values.length, range.endIndex))
+  if (end <= start) return ''
+  const sampled = downsampleForPixels(values, start, end, width)
+  const scaleValues = scaleReference
+    ? [
+        ...values.slice(start, end),
+        ...scaleReference.slice(start, Math.min(scaleReference.length, end)),
+      ]
+    : values.slice(start, end)
+  const min = Math.min(...scaleValues)
+  const max = Math.max(...scaleValues)
+  const valueRange = Math.max(1, max - min)
+  return sampled.map((point, index) => {
+    const y = height - ((point.value - min) / valueRange) * (height - 14) - 7
+    const x = point.x
     return `${index === 0 ? 'M' : 'L'}${x.toFixed(1)},${y.toFixed(1)}`
   }).join(' ')
 }
 
-function downsample(values: number[], maxPoints: number) {
-  if (values.length <= maxPoints) return values
-  const step = Math.ceil(values.length / maxPoints)
-  const out: number[] = []
-  for (let i = 0; i < values.length; i += step) {
-    let min = values[i]
-    let max = values[i]
-    for (let j = i + 1; j < Math.min(values.length, i + step); j += 1) {
+function downsampleForPixels(values: number[], start: number, end: number, width: number) {
+  const length = end - start
+  if (length <= 0) return []
+  if (length <= width * 1.5) {
+    return values.slice(start, end).map((value, offset) => ({
+      x: (offset / Math.max(1, length - 1)) * width,
+      value,
+    }))
+  }
+  const bucketCount = Math.max(1, Math.floor(width))
+  const bucketSize = length / bucketCount
+  const out: Array<{ x: number; value: number }> = []
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const bucketStart = start + Math.floor(bucket * bucketSize)
+    const bucketEnd = Math.min(end, start + Math.floor((bucket + 1) * bucketSize))
+    if (bucketStart >= bucketEnd) continue
+    let min = values[bucketStart]
+    let max = values[bucketStart]
+    let minIndex = bucketStart
+    let maxIndex = bucketStart
+    for (let j = bucketStart + 1; j < bucketEnd; j += 1) {
       min = Math.min(min, values[j])
       max = Math.max(max, values[j])
+      if (values[j] === min) minIndex = j
+      if (values[j] === max) maxIndex = j
     }
-    out.push(min, max)
+    const points = minIndex <= maxIndex
+      ? [
+          { index: minIndex, value: min },
+          { index: maxIndex, value: max },
+        ]
+      : [
+          { index: maxIndex, value: max },
+          { index: minIndex, value: min },
+        ]
+    for (const point of points) {
+      out.push({
+        x: ((point.index - start) / Math.max(1, length - 1)) * width,
+        value: point.value,
+      })
+    }
   }
   return out
 }
 
+function buildViewRange(rows: Row[], viewSeconds: number, viewStartRatio: number): ViewRange {
+  if (rows.length === 0) {
+    return { startIndex: 0, endIndex: 0, startMs: 0, endMs: 0, durationMs: 0 }
+  }
+  const firstMs = rows[0].t
+  const lastMs = rows[rows.length - 1].t
+  const totalMs = Math.max(0, lastMs - firstMs)
+  const windowMs = Math.min(Math.max(1, viewSeconds * 1000), Math.max(1, totalMs))
+  const maxStartMs = Math.max(firstMs, lastMs - windowMs)
+  const startMs = firstMs + (maxStartMs - firstMs) * Math.min(1, Math.max(0, viewStartRatio))
+  const endMs = Math.min(lastMs, startMs + windowMs)
+  const startIndex = lowerBoundRows(rows, startMs)
+  const endIndex = Math.max(startIndex + 1, upperBoundRows(rows, endMs))
+  return {
+    startIndex,
+    endIndex: Math.min(rows.length, endIndex),
+    startMs,
+    endMs,
+    durationMs: endMs - startMs,
+  }
+}
+
+function lowerBoundRows(rows: Row[], timestampMs: number) {
+  let low = 0
+  let high = rows.length
+  while (low < high) {
+    const mid = low + ((high - low) >> 1)
+    if (rows[mid].t < timestampMs) low = mid + 1
+    else high = mid
+  }
+  return low
+}
+
+function upperBoundRows(rows: Row[], timestampMs: number) {
+  let low = 0
+  let high = rows.length
+  while (low < high) {
+    const mid = low + ((high - low) >> 1)
+    if (rows[mid].t <= timestampMs) low = mid + 1
+    else high = mid
+  }
+  return low
+}
+
+function formatSeconds(timestampMs: number) {
+  return `${(timestampMs / 1000).toFixed(1)}s`
+}
+
 function parseCsv(text: string): Row[] {
   const lines = text.trim().split(/\r?\n/)
-  const headers = lines.shift()?.split(',').map((h) => h.trim().toLowerCase()) ?? []
-  const find = (...names: string[]) => headers.findIndex((h) => names.some((n) => h.includes(n)))
-  const t = find('timestamp', 'time')
-  const ecg = find('ecg')
-  const ir = find('ir', 'ppg')
-  const red = find('red')
-  const ax = find('ax', 'acc_x')
-  const ay = find('ay', 'acc_y')
-  const az = find('az', 'acc_z')
+  const headers = lines.shift()?.split(',').map(normalizeHeader) ?? []
+  const t = pickColumn(headers, ['timestamp_ms', 'time_ms', 'timestamp', 'time'])
+  const ecg = pickColumn(headers, ['ecg_filtered', 'ecg'])
+  const ir = pickColumn(headers, ['ppg_ir_filtered', 'ppg_ir', 'ir_filtered', 'ir', 'ppg'])
+  const red = pickColumn(headers, ['ppg_red_filtered', 'ppg_red', 'red_filtered', 'red'])
+  const ax = pickColumn(headers, ['imu_ax', 'acc_x', 'ax'])
+  const ay = pickColumn(headers, ['imu_ay', 'acc_y', 'ay'])
+  const az = pickColumn(headers, ['imu_az', 'acc_z', 'az'])
+  let lastEcg = 0
+  let lastIr = 0
+  let lastRed = 0
+  let lastAx = 0
+  let lastAy = 0
+  let lastAz = 0
   return lines.map((line, index) => {
-    const cells = line.split(',').map(Number)
+    const cells = line.split(',')
+    const nextEcg = readCell(cells, ecg, lastEcg)
+    const nextIr = readCell(cells, ir, lastIr)
+    const nextRed = readCell(cells, red, Number.isFinite(nextIr) ? nextIr : lastRed)
+    const nextAx = readCell(cells, ax, lastAx)
+    const nextAy = readCell(cells, ay, lastAy)
+    const nextAz = readCell(cells, az, lastAz)
+    lastEcg = nextEcg
+    lastIr = nextIr
+    lastRed = nextRed
+    lastAx = nextAx
+    lastAy = nextAy
+    lastAz = nextAz
     return {
-      t: cells[t] || index * 5,
-      ecg: cells[ecg] || 0,
-      ppgIr: cells[ir] || 0,
-      ppgRed: cells[red] || cells[ir] || 0,
-      ax: cells[ax] || 0,
-      ay: cells[ay] || 0,
-      az: cells[az] || 0,
+      t: readCell(cells, t, index * 5),
+      ecg: nextEcg,
+      ppgIr: nextIr,
+      ppgRed: nextRed,
+      ax: nextAx,
+      ay: nextAy,
+      az: nextAz,
     }
   }).filter((row) => Number.isFinite(row.ecg) || Number.isFinite(row.ppgIr))
+}
+
+function normalizeHeader(header: string) {
+  return header.trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+}
+
+function pickColumn(headers: string[], preferred: string[]) {
+  for (const name of preferred) {
+    const exact = headers.indexOf(name)
+    if (exact >= 0) return exact
+  }
+  for (const name of preferred) {
+    const partial = headers.findIndex((header) => header.includes(name))
+    if (partial >= 0) return partial
+  }
+  return -1
+}
+
+function readCell(cells: string[], index: number, fallback: number) {
+  if (index < 0 || index >= cells.length) return fallback
+  const raw = cells[index].trim()
+  if (!raw) return fallback
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : fallback
 }
 
 function runDsp(rows: Row[], params: Params) {

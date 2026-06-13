@@ -2084,7 +2084,7 @@ WaveformSlice _buildWaveformSlice(
   int firstVisibleIndex,
   int endExclusive,
 ) {
-  const maxVisiblePoints = 600;
+  const maxVisiblePoints = 2400;
   var minValue = points[firstVisibleIndex].value;
   var maxValue = minValue;
   final length = endExclusive - firstVisibleIndex;

@@ -104,6 +104,62 @@ main {
   gap: 14px;
 }
 
+.view-panel {
+  border: 1px solid #d7e4db;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f8fbf9;
+}
+
+.view-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.view-row label {
+  display: block;
+}
+
+.view-row label > span,
+.view-row label > b {
+  display: inline-block;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.view-row label > b {
+  float: right;
+}
+
+.view-row input {
+  width: 100%;
+}
+
+.view-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.view-actions button {
+  border: 1px solid #c8d8ce;
+  border-radius: 6px;
+  background: white;
+  color: #123524;
+  padding: 6px 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.view-actions span {
+  margin-left: auto;
+  color: #5f7569;
+  font-size: 12px;
+}
+
 .chart {
   border: 1px solid #edf2ee;
   border-radius: 8px;
@@ -112,8 +168,18 @@ main {
 }
 
 .chart h3 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 8px;
   font-size: 15px;
+}
+
+.chart h3 small {
+  color: #5f7569;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 svg {
@@ -126,7 +192,7 @@ svg {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -169,5 +235,14 @@ textarea {
 
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .view-row {
+    grid-template-columns: 1fr;
+  }
+
+  .view-actions span {
+    width: 100%;
+    margin-left: 0;
   }
 }
