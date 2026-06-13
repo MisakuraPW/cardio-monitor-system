@@ -17,6 +17,11 @@ constexpr uint8_t TEMP_FLAG_NO_PRESENCE = 0x40;
 bool begin();
 bool readSample(TemperatureSample& sample);
 uint8_t lastStatusFlags();
+const char* lastFailureStage();
+uint8_t lastCrcCalculated();
+uint8_t lastCrcRead();
+void copyLastScratchpad(uint8_t* out, size_t len);
+void copyLastRom(uint8_t* out, size_t len);
 uint32_t crcFailCount();
 uint32_t busFailCount();
 

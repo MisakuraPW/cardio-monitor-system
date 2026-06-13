@@ -110,7 +110,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_TEMP_OUTPUT
-#define ENABLE_TEMP_OUTPUT 0
+#define ENABLE_TEMP_OUTPUT 1
 #endif
 
 // Logger format:
@@ -138,7 +138,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef MQTT_BROKER_HOST
-#define MQTT_BROKER_HOST "broker.hivemq.com"  //"182.254.220.56"
+#define MQTT_BROKER_HOST "182.254.220.56" //"broker.hivemq.com" 
 #endif
 
 #ifndef MQTT_BROKER_PORT

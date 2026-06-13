@@ -47,6 +47,7 @@ constexpr TickType_t kImuPeriodTicks = pdMS_TO_TICKS(BMI_SAMPLE_PERIOD_US / 1000
 constexpr TickType_t kTempPeriodTicks = pdMS_TO_TICKS(M601_SAMPLE_PERIOD_MS);
 constexpr TickType_t kEcgPeriodTicks = pdMS_TO_TICKS(2);
 constexpr TickType_t kSensorStallTimeout = pdMS_TO_TICKS(2000);
+constexpr TickType_t kTempStallTimeout = pdMS_TO_TICKS(10000);
 constexpr TickType_t kReinitRetryInterval = pdMS_TO_TICKS(1000);
 constexpr TickType_t kTempReinitRetryInterval = pdMS_TO_TICKS(5000);
 constexpr TickType_t kSwitchDebounceTicks = pdMS_TO_TICKS(OUTPUT_MODE_SWITCH_DEBOUNCE_MS);
@@ -317,8 +318,15 @@ bool bringUpTemp(const bool recoveryMode) {
     data_logger::logStatus(msg);
     return false;
   }
+  uint8_t rom[8] = {};
+  m601_temp::copyLastRom(rom, sizeof(rom));
+  char diagMsg[128];
+  snprintf(diagMsg, sizeof(diagMsg),
+           recoveryMode ? "M601 recovered diag=v3 rom=%02X %02X %02X %02X %02X %02X %02X %02X."
+                        : "M601 ready diag=v3 rom=%02X %02X %02X %02X %02X %02X %02X %02X.",
+           rom[0], rom[1], rom[2], rom[3], rom[4], rom[5], rom[6], rom[7]);
   g_tempLastSampleTick = xTaskGetTickCount();
-  data_logger::logStatus(recoveryMode ? "M601 recovered." : "M601 ready.");
+  data_logger::logStatus(diagMsg);
   return true;
 }
 
@@ -422,14 +430,30 @@ void tempTask(void* /*pvParameters*/) {
       g_hasLastTemperatureSample = true;
       (void)xQueueSend(g_tempQueue, &sample, pdMS_TO_TICKS(10));
     } else {
-      if (g_hasLastTemperatureSample &&
-          (now - g_tempLastFailureReportTick) >= pdMS_TO_TICKS(2000)) {
+      if ((now - g_tempLastFailureReportTick) >= pdMS_TO_TICKS(2000)) {
         g_tempLastFailureReportTick = now;
-        TemperatureSample stale = g_lastTemperatureSample;
-        stale.flags = static_cast<uint8_t>(m601_temp::lastStatusFlags() | m601_temp::TEMP_FLAG_STALE);
-        (void)xQueueSend(g_tempQueue, &stale, 0);
+        uint8_t scratchpad[9] = {};
+        uint8_t rom[8] = {};
+        m601_temp::copyLastScratchpad(scratchpad, sizeof(scratchpad));
+        m601_temp::copyLastRom(rom, sizeof(rom));
+        char msg[240];
+        snprintf(msg, sizeof(msg),
+                 "M601 read failed diag=v3 stage=%s flags=0x%02X busFail=%lu crcFail=%lu crcCalc=0x%02X crcRead=0x%02X rom=%02X %02X %02X %02X %02X %02X %02X %02X sp=%02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                 m601_temp::lastFailureStage(), m601_temp::lastStatusFlags(),
+                 static_cast<unsigned long>(m601_temp::busFailCount()),
+                 static_cast<unsigned long>(m601_temp::crcFailCount()),
+                 m601_temp::lastCrcCalculated(), m601_temp::lastCrcRead(), rom[0], rom[1],
+                 rom[2], rom[3], rom[4], rom[5], rom[6], rom[7], scratchpad[0], scratchpad[1],
+                 scratchpad[2], scratchpad[3], scratchpad[4], scratchpad[5], scratchpad[6],
+                 scratchpad[7], scratchpad[8]);
+        data_logger::logStatus(msg);
+        if (g_hasLastTemperatureSample) {
+          TemperatureSample stale = g_lastTemperatureSample;
+          stale.flags = static_cast<uint8_t>(m601_temp::lastStatusFlags() | m601_temp::TEMP_FLAG_STALE);
+          (void)xQueueSend(g_tempQueue, &stale, 0);
+        }
       }
-      if ((now - g_tempLastSampleTick) > kSensorStallTimeout) {
+      if ((now - g_tempLastSampleTick) > kTempStallTimeout) {
         g_tempOnline = false;
         data_logger::logStatus("M601 stalled, entering recovery.");
       }
