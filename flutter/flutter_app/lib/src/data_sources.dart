@@ -982,6 +982,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
 
       if (topic.endsWith('/metrics')) {
         _statsController.add(TransportStats.fromMqttMetrics(jsonMap));
+        _handleMetricsTelemetry(jsonMap);
         continue;
       }
 
@@ -1045,6 +1046,107 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       receivedAtMs: DateTime.now().millisecondsSinceEpoch,
       sourceSeq: seq,
     ));
+  }
+
+  void _handleMetricsTelemetry(Map<String, dynamic> json) {
+    final timestampMs = (json['timestampMs'] as num?)?.toInt() ??
+        DateTime.now().millisecondsSinceEpoch;
+    final seq = (json['seq'] as num?)?.toInt() ?? 0;
+    final deviceId = (json['deviceId'] ?? config.deviceId).toString();
+    final sessionId = (json['sessionId'] ?? _binarySessionId).toString();
+    final receivedAtMs = DateTime.now().millisecondsSinceEpoch;
+
+    final descriptors = <ChannelDescriptor>[];
+    final frames = <SignalFrame>[];
+
+    final temp = json['temp'];
+    if (temp is Map<String, dynamic> && temp['present'] == true) {
+      final tempC = (temp['tempC'] as num?)?.toDouble();
+      final tsUs = (temp['tsUs'] as num?)?.toInt();
+      if (tempC != null) {
+        descriptors.add(ChannelDescriptor(
+          key: 'temp',
+          label: '体温',
+          unit: '°C',
+          sampleRate: 1,
+          colorHex: '#E76F51',
+          enabled: true,
+        ));
+        frames.add(SignalFrame(
+          deviceId: deviceId,
+          sessionId: sessionId,
+          seq: seq,
+          timestampMs: tsUs != null && tsUs > 0 ? tsUs ~/ 1000 : timestampMs,
+          channelKey: 'temp',
+          sampleRate: 1,
+          unit: '°C',
+          quality: 1,
+          samples: <double>[tempC],
+          sampleTimestampsMs: <int>[tsUs != null && tsUs > 0 ? tsUs ~/ 1000 : timestampMs],
+          transport: 'mqtt_metrics',
+          receivedAtMs: receivedAtMs,
+          sourceSeq: seq,
+        ));
+      }
+    }
+
+    final imu = json['imu'];
+    if (imu is Map<String, dynamic> && imu['present'] == true) {
+      final tsUs = (imu['tsUs'] as num?)?.toInt();
+      final sampleTimestampMs = tsUs != null && tsUs > 0 ? tsUs ~/ 1000 : timestampMs;
+      const imuChannels = <String, (String, String)>{
+        'imu_ax': ('IMU AX', '#2A9D8F'),
+        'imu_ay': ('IMU AY', '#36B7A1'),
+        'imu_az': ('IMU AZ', '#55C7AE'),
+        'imu_gx': ('IMU GX', '#7B6DFF'),
+        'imu_gy': ('IMU GY', '#9A7CFF'),
+        'imu_gz': ('IMU GZ', '#B792FF'),
+      };
+      const imuJsonKeys = <String, String>{
+        'imu_ax': 'ax',
+        'imu_ay': 'ay',
+        'imu_az': 'az',
+        'imu_gx': 'gx',
+        'imu_gy': 'gy',
+        'imu_gz': 'gz',
+      };
+      for (final entry in imuChannels.entries) {
+        final value = (imu[imuJsonKeys[entry.key]] as num?)?.toDouble();
+        if (value == null) {
+          continue;
+        }
+        descriptors.add(ChannelDescriptor(
+          key: entry.key,
+          label: entry.value.$1,
+          unit: 'raw',
+          sampleRate: 1,
+          colorHex: entry.value.$2,
+          enabled: true,
+        ));
+        frames.add(SignalFrame(
+          deviceId: deviceId,
+          sessionId: sessionId,
+          seq: seq,
+          timestampMs: sampleTimestampMs,
+          channelKey: entry.key,
+          sampleRate: 1,
+          unit: 'raw',
+          quality: 1,
+          samples: <double>[value],
+          sampleTimestampsMs: <int>[sampleTimestampMs],
+          transport: 'mqtt_metrics',
+          receivedAtMs: receivedAtMs,
+          sourceSeq: seq,
+        ));
+      }
+    }
+
+    if (descriptors.isNotEmpty) {
+      _mergeBinaryCatalog(descriptors);
+    }
+    for (final frame in frames) {
+      _frameController.add(frame);
+    }
   }
 
   bool _tryHandleBinaryPayload(String topic, Uint8List payloadBytes) {

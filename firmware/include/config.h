@@ -58,7 +58,7 @@ constexpr uint32_t OUTPUT_MODE_TASK_STACK = 8192;
 constexpr UBaseType_t ECG_TASK_PRIORITY = 4;
 constexpr UBaseType_t PPG_TASK_PRIORITY = 3;
 constexpr UBaseType_t IMU_TASK_PRIORITY = 3;
-constexpr UBaseType_t TEMP_TASK_PRIORITY = 2;
+constexpr UBaseType_t TEMP_TASK_PRIORITY = 1;
 constexpr UBaseType_t LOGGER_TASK_PRIORITY = 2;  // packetizer/logger
 constexpr UBaseType_t UART_TASK_PRIORITY = 1;
 constexpr UBaseType_t MQTT_TASK_PRIORITY = 3;
@@ -94,7 +94,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef ENABLE_SERIAL_LOGGER
-#define ENABLE_SERIAL_LOGGER 1  // 1 = print text logs to serial, 0 = disable
+#define ENABLE_SERIAL_LOGGER 0  // 1 = print text logs to serial, 0 = disable
 #endif
 
 #ifndef ENABLE_ECG_OUTPUT
@@ -138,7 +138,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #endif
 
 #ifndef MQTT_BROKER_HOST
-#define MQTT_BROKER_HOST "182.254.220.56" //"broker.hivemq.com" 
+#define MQTT_BROKER_HOST "182.254.220.56" // "broker.hivemq.com"
 #endif
 
 #ifndef MQTT_BROKER_PORT
@@ -161,7 +161,7 @@ constexpr const char* BLE_DEVICE_NAME = "esp32-bio";
 #define MQTT_SESSION_ID "debug-session"
 #endif
 
-constexpr uint32_t MQTT_PUBLISH_PERIOD_MS = 5000;
+constexpr uint32_t MQTT_PUBLISH_PERIOD_MS = 1000;
 constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
 constexpr uint32_t MQTT_RETRY_INTERVAL_MS = 3000;
 

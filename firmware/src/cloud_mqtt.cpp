@@ -114,6 +114,10 @@ size_t g_ecgBatchCount = 0;
 size_t g_ppgBatchCount = 0;
 size_t g_imuBatchCount = 0;
 size_t g_tempBatchCount = 0;
+ImuSample g_latestImu = {};
+TemperatureSample g_latestTemp = {};
+bool g_hasLatestImu = false;
+bool g_hasLatestTemp = false;
 
 void appendU16Le(uint8_t* dst, const uint16_t v) {
   dst[0] = static_cast<uint8_t>(v & 0xFFU);
@@ -771,6 +775,8 @@ void publishDiagTelemetry() {
   const uint32_t tempBusFails = m601_temp::busFailCount();
   const uint8_t tempFlags = m601_temp::lastStatusFlags();
   const int mqttOutboxBytes = (g_mqttClient == nullptr) ? 0 : esp_mqtt_client_get_outbox_size(g_mqttClient);
+  const bool hasImu = g_hasLatestImu;
+  const bool hasTemp = g_hasLatestTemp;
 
   char payload[kMqttPayloadBuffer];
   snprintf(payload, sizeof(payload),
@@ -785,6 +791,8 @@ void publishDiagTelemetry() {
            "\"tempCrcFailCount\":%lu,\"tempBusFailCount\":%lu,\"tempStatusFlags\":%u,"
            "\"rssi\":%ld,\"heapFree\":%lu,\"lastPublishLatencyMs\":%lu,"
            "\"dsp\":{\"enabled\":%s,\"version\":%lu,\"motion\":%.3f,\"ecgQuality\":%.3f,\"ppgQuality\":%.3f,\"ecgBpm\":%.2f,\"ppgBpm\":%.2f},"
+           "\"imu\":{\"present\":%s,\"tsUs\":%llu,\"ax\":%d,\"ay\":%d,\"az\":%d,\"gx\":%d,\"gy\":%d,\"gz\":%d},"
+           "\"temp\":{\"present\":%s,\"tsUs\":%llu,\"raw\":%d,\"tempC\":%.4f,\"flags\":%u},"
            "\"ow\":{\"ecg\":%lu,\"ppg\":%lu,\"imu\":%lu,\"temp\":%lu}}",
            MQTT_TOPIC_DEVICE_ID,
            g_clientId,
@@ -823,6 +831,19 @@ void publishDiagTelemetry() {
            static_cast<double>(dsp.ppgQuality),
            static_cast<double>(dsp.ecgHeartRateBpm),
            static_cast<double>(dsp.ppgPulseRateBpm),
+           hasImu ? "true" : "false",
+           static_cast<unsigned long long>(hasImu ? g_latestImu.ts_us : 0ULL),
+           hasImu ? static_cast<int>(g_latestImu.acc_x) : 0,
+           hasImu ? static_cast<int>(g_latestImu.acc_y) : 0,
+           hasImu ? static_cast<int>(g_latestImu.acc_z) : 0,
+           hasImu ? static_cast<int>(g_latestImu.gyr_x) : 0,
+           hasImu ? static_cast<int>(g_latestImu.gyr_y) : 0,
+           hasImu ? static_cast<int>(g_latestImu.gyr_z) : 0,
+           hasTemp ? "true" : "false",
+           static_cast<unsigned long long>(hasTemp ? g_latestTemp.ts_us : 0ULL),
+           hasTemp ? static_cast<int>(g_latestTemp.raw) : 0,
+           static_cast<double>(hasTemp ? g_latestTemp.temp_c : 0.0f),
+           hasTemp ? static_cast<unsigned>(g_latestTemp.flags) : 0,
            static_cast<unsigned long>(g_overwriteEcg),
            static_cast<unsigned long>(g_overwritePpg),
            static_cast<unsigned long>(g_overwriteImu),
@@ -1150,7 +1171,7 @@ void begin() {
     mqttConfig.session.keepalive = 45;
     mqttConfig.network.disable_auto_reconnect = false;
     mqttConfig.network.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
-    mqttConfig.network.timeout_ms = 500;
+    mqttConfig.network.timeout_ms = 1000;
     mqttConfig.task.stack_size = kEspMqttTaskStack;
     mqttConfig.task.priority = kEspMqttTaskPriority;
     mqttConfig.buffer.size = kMqttPayloadBuffer + 64;
@@ -1161,7 +1182,7 @@ void begin() {
     mqttConfig.keepalive = 45;
     mqttConfig.disable_auto_reconnect = false;
     mqttConfig.reconnect_timeout_ms = MQTT_RETRY_INTERVAL_MS;
-    mqttConfig.network_timeout_ms = 500;
+    mqttConfig.network_timeout_ms = 1000;
     mqttConfig.task_stack = kEspMqttTaskStack;
     mqttConfig.task_prio = kEspMqttTaskPriority;
     mqttConfig.buffer_size = kMqttPayloadBuffer + 64;
@@ -1283,22 +1304,10 @@ bool enqueueImu(const ImuSample& sample) {
       return true;
     }
   }
+  g_latestImu = sample;
+  g_hasLatestImu = true;
   if (!g_enableImu) {
     return true;
-  }
-  if (!ensureAsyncReady()) {
-    return true;
-  }
-  if (outboxFillPermille() >= kOutboxHighPressurePermille ||
-      g_ecgBatchCount >= (kEcgBatchMax / 2U)) {
-    ++g_dropImu;
-    return true;
-  }
-
-  g_imuBatch[g_imuBatchCount++] = sample;
-  if (g_imuBatchCount >= kImuBatchMax) {
-    publishImuBatch(g_imuBatch, g_imuBatchCount);
-    g_imuBatchCount = 0;
   }
   return true;
 }
@@ -1310,16 +1319,8 @@ bool enqueueTemperature(const TemperatureSample& sample) {
   if (!g_enableTemp) {
     return true;
   }
-  if (!ensureAsyncReady()) {
-    return true;
-  }
-  if (outboxFillPermille() >= kOutboxHighPressurePermille) {
-    ++g_dropTemp;
-    return true;
-  }
-  g_tempBatch[g_tempBatchCount++] = sample;
-  publishTemperatureBatch(g_tempBatch, g_tempBatchCount);
-  g_tempBatchCount = 0;
+  g_latestTemp = sample;
+  g_hasLatestTemp = true;
   return true;
 }
 

@@ -226,11 +226,11 @@ void emitPpg(const PpgSample& s) {
 
 void emitImu(const ImuSample& s) {
   signal_dsp::updateImu(s);
-  if (!kEnableImuOutput) {
-    return;
-  }
   if (g_useWifiOutput) {
     (void)cloud_mqtt::enqueueImu(s);
+  }
+  if (!kEnableImuOutput) {
+    return;
   }
   if (g_useBleOutput) {
     (void)ble_stream::enqueueImu(s);
@@ -712,7 +712,7 @@ void createTasks() {
   }
   if (kEnableTempOutput) {
     if (xTaskCreatePinnedToCore(tempTask, "temp_task", TEMP_TASK_STACK, nullptr,
-                                TEMP_TASK_PRIORITY, nullptr, 0) != pdPASS) {
+                                TEMP_TASK_PRIORITY, nullptr, 1) != pdPASS) {
       taskCreateFailed = true;
     }
   }
