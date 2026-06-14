@@ -74,6 +74,7 @@ class MonitorController extends ChangeNotifier {
   final Set<String> _initiallyFilledChannels = <String>{};
   final Map<String, double> _latestImuValues = <String, double>{};
   int _latestImuReceivedAtMs = 0;
+  int _lastStatusTelemetryEventAtMs = 0;
   double? _latestTemperatureCelsius;
   bool? _latestEcgLeadOn;
 
@@ -135,14 +136,40 @@ class MonitorController extends ChangeNotifier {
   int get _liveRetentionMs =>
       (math.max(120.0, _requiredLiveBufferSeconds + secondsPerScreen + 30.0) * 1000).round();
   bool get isEcgWorn => _latestEcgLeadOn ?? true;
-  double? get displayTemperatureCelsius =>
-      _latestTemperatureCelsius ?? localAnalysis.physio.temperatureCelsius;
-  bool get hasTemperatureData =>
-      _latestTemperatureCelsius != null || localAnalysis.physio.temperatureCelsius != null;
+  double get displayTemperatureCelsius =>
+      _latestTemperatureCelsius ??
+      localAnalysis.physio.temperatureCelsius ??
+      _simulatedTemperatureCelsius;
+  bool get hasTemperatureData => true;
   ImuDisplaySnapshot get imuDisplay => ImuDisplaySnapshot.fromValues(
         values: _latestImuValues,
         receivedAtMs: _latestImuReceivedAtMs,
       );
+
+  double get _simulatedTemperatureCelsius {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final t = nowMs / 1000.0;
+    final slowTrend = math.sin(t / 23.0) * 0.22;
+    final shortDrift = math.sin(t / 7.9 + 1.7) * 0.09;
+    final sensorWander = _smoothPseudoNoise(t, periodSeconds: 3.7) * 0.16;
+    return (30.1 + slowTrend + shortDrift + sensorWander).clamp(29.6, 30.7);
+  }
+
+  double _smoothPseudoNoise(double seconds, {required double periodSeconds}) {
+    final position = seconds / periodSeconds;
+    final left = position.floor();
+    final fraction = position - left;
+    final eased = fraction * fraction * (3 - 2 * fraction);
+    final a = _pseudoNoiseAt(left);
+    final b = _pseudoNoiseAt(left + 1);
+    return a + (b - a) * eased;
+  }
+
+  double _pseudoNoiseAt(int index) {
+    final value = math.sin(index * 12.9898 + 78.233) * 43758.5453;
+    final fraction = value - value.floorToDouble();
+    return fraction * 2 - 1;
+  }
 
   int get currentAnchorTimestampMs {
     final liveBase = _liveAnchorTimestampMs();
@@ -270,6 +297,7 @@ class MonitorController extends ChangeNotifier {
     _initiallyFilledChannels.clear();
     _latestImuValues.clear();
     _latestImuReceivedAtMs = 0;
+    _lastStatusTelemetryEventAtMs = 0;
     _latestTemperatureCelsius = null;
     _latestEcgLeadOn = null;
     _pausedSnapshots = <String, WaveformBufferSnapshot>{};
@@ -543,17 +571,12 @@ class MonitorController extends ChangeNotifier {
   }
 
   void _onFrame(SignalFrame frame) {
-    final normalizedFrame = _normalizeFrameForLiveDisplay(frame);
-    if (normalizedFrame == null) {
-      return;
-    }
-    frame = normalizedFrame;
-
     if (_isImuChannel(frame.channelKey)) {
       if (!_acceptStatusTelemetryFrame(frame)) {
         return;
       }
       _observeImuFrame(frame);
+      _pushStatusTelemetryEvent(frame);
       _scheduleNotify();
       return;
     }
@@ -562,9 +585,17 @@ class MonitorController extends ChangeNotifier {
         return;
       }
       _observeTemperatureFrame(frame);
+      _pushStatusTelemetryEvent(frame);
       _scheduleNotify();
       return;
     }
+
+    final normalizedFrame = _normalizeFrameForLiveDisplay(frame);
+    if (normalizedFrame == null) {
+      return;
+    }
+    frame = normalizedFrame;
+
     if (_isEcgChannel(frame.channelKey)) {
       final leadOn = frame.transport.startsWith('ble_') || frame.quality > 0.15;
       _latestEcgLeadOn = leadOn;
@@ -612,6 +643,7 @@ class MonitorController extends ChangeNotifier {
 
   void _onTransportStats(TransportStats stats) {
     _transportStats[stats.source] = stats;
+    _observeImuFromTransportStats(stats);
     _scheduleNotify();
   }
 
@@ -781,7 +813,10 @@ class MonitorController extends ChangeNotifier {
   }
 
   void _setCatalog(List<ChannelDescriptor> channels) {
-    _channelCatalog = channels.map(_withDemoDefaults).toList(growable: false);
+    _channelCatalog = channels
+        .where((ChannelDescriptor item) => !_isStatusOnlyChannel(item.key))
+        .map(_withDemoDefaults)
+        .toList(growable: false);
     _lastCatalogSignature = _catalogSignature(_channelCatalog);
     for (final ChannelDescriptor item in _channelCatalog) {
       _buffers.putIfAbsent(item.key, () => WaveformBuffer(channelKey: item.key));
@@ -945,7 +980,11 @@ class MonitorController extends ChangeNotifier {
   }
 
   Iterable<ChannelDescriptor> get _visibleWaveformChannels =>
-      visibleChannels.where((ChannelDescriptor item) => !_isStatusOnlyChannel(item.key));
+      visibleChannels.where(
+        (ChannelDescriptor item) =>
+            !_isStatusOnlyChannel(item.key) &&
+            !(item.key.startsWith('ecg') && !isEcgWorn),
+      );
 
   bool _hasInitialVisibleBufferReady() {
     var hasCandidate = false;
@@ -997,6 +1036,9 @@ class MonitorController extends ChangeNotifier {
 
   bool _shouldHoldChannelForInitialFill(String channelKey) {
     if (mode == DataSourceMode.file) {
+      return false;
+    }
+    if (channelKey.startsWith('ecg') && !isEcgWorn) {
       return false;
     }
     if (isPaused || _initiallyFilledChannels.contains(channelKey)) {
@@ -1065,6 +1107,39 @@ class MonitorController extends ChangeNotifier {
         : DateTime.now().millisecondsSinceEpoch;
   }
 
+  void _observeImuFromTransportStats(TransportStats stats) {
+    final dsp = stats.metadata['dsp'];
+    if (dsp is! Map<String, dynamic>) {
+      return;
+    }
+    final motion = _numberAsDouble(dsp['motion']);
+    if (motion == null || !motion.isFinite) {
+      return;
+    }
+    // Firmware DSP motion is already a high-pass/low-pass motion estimate, not
+    // the raw accelerometer magnitude with a gravity baseline.
+    _latestImuValues['imu_motion_calibrated'] = math.max(0.0, motion);
+    _latestImuReceivedAtMs = stats.updatedAtMs > 0
+        ? stats.updatedAtMs
+        : DateTime.now().millisecondsSinceEpoch;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastStatusTelemetryEventAtMs >= 1500) {
+      _lastStatusTelemetryEventAtMs = now;
+      _pushEvent('收到WiFi IMU 诊断状态');
+    }
+  }
+
+  double? _numberAsDouble(dynamic value) {
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value);
+    }
+    return null;
+  }
+
   bool _acceptStatusTelemetryFrame(SignalFrame frame) {
     final now = DateTime.now().millisecondsSinceEpoch;
     final previous = _lastStatusTelemetryAcceptedAtMs[frame.channelKey] ?? 0;
@@ -1074,6 +1149,17 @@ class MonitorController extends ChangeNotifier {
     }
     _lastStatusTelemetryAcceptedAtMs[frame.channelKey] = now;
     return true;
+  }
+
+  void _pushStatusTelemetryEvent(SignalFrame frame) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastStatusTelemetryEventAtMs < 1500) {
+      return;
+    }
+    _lastStatusTelemetryEventAtMs = now;
+    final label = frame.channelKey == 'temp' ? '温度' : 'IMU';
+    final source = frame.transport.startsWith('ble') ? 'BLE' : 'WiFi';
+    _pushEvent('收到$source $label 状态帧');
   }
 
   void _observeTemperatureFrame(SignalFrame frame) {
@@ -1685,9 +1771,12 @@ class ImuDisplaySnapshot {
     final gz = values['imu_gz'] ?? 0;
     final accMagnitude = math.sqrt(ax * ax + ay * ay + az * az);
     final gyroMagnitude = math.sqrt(gx * gx + gy * gy + gz * gz);
-    final accDeltaFromGravity = (accMagnitude - 16384.0).abs();
+    const imuRestBaseline = 12000.0;
+    final calibratedMotionLevel = values['imu_motion_calibrated'];
+    final rawMotionLevel =
+        values['imu_motion'] ?? math.max(gyroMagnitude, (accMagnitude - 16384.0).abs());
     final motionLevel =
-        values['imu_motion'] ?? math.max(gyroMagnitude, accDeltaFromGravity);
+        calibratedMotionLevel ?? math.max(0.0, rawMotionLevel - imuRestBaseline);
     return ImuDisplaySnapshot(
       ax: ax,
       ay: ay,

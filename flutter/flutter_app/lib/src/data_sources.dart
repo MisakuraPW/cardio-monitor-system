@@ -19,8 +19,15 @@ const List<String> _statusTelemetryChannelKeys = <String>[
   'imu_gx',
   'imu_gy',
   'imu_gz',
+  'imu_motion',
   'temp',
 ];
+
+bool _isStatusTelemetryChannelKey(String key) =>
+    key == 'temp' ||
+    key == 'imu' ||
+    key == 'imu_motion' ||
+    key.startsWith('imu_');
 
 abstract class DataSourceAdapter {
   Stream<SignalFrame> get streamFrames;
@@ -759,6 +766,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
   bool _hasSeenBinaryPayload = false;
 
   String get _baseTopic => 'cardio/${config.deviceId}';
+  String get _rootTopic => 'cardio';
 
   @override
   Stream<SignalFrame> get streamFrames => _frameController.stream;
@@ -839,6 +847,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     }
 
     _client = client;
+    client.subscribe('$_rootTopic/#', MqttQos.atMostOnce);
     client.subscribe('$_baseTopic/status', MqttQos.atLeastOnce);
     if (config.demoMode) {
       client.subscribe('$_baseTopic/waveform_bin/ecg_filtered', MqttQos.atMostOnce);
@@ -900,7 +909,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     final enabledKeys = channels
         .where((ChannelDescriptor item) => item.enabled)
         .map((ChannelDescriptor item) => item.key)
-        .where((String key) => !config.demoMode || _isDemoRealtimeChannel(key))
+        .where((String key) => !config.demoMode || _isDemoWaveformChannel(key))
         .toList();
     if (config.demoMode) {
       enabledKeys.addAll(_statusTelemetryChannelKeys);
@@ -961,6 +970,7 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
               (dynamic item) =>
                   ChannelDescriptor.fromJson(item as Map<String, dynamic>),
             )
+            .where((ChannelDescriptor item) => !_isStatusTelemetryChannelKey(item.key))
             .toList();
         _catalogController.add(List<ChannelDescriptor>.from(catalog));
         _emitStatus(
@@ -1064,16 +1074,6 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     }
     if (tempValues.isEmpty) return;
 
-    _mergeBinaryCatalog(<ChannelDescriptor>[
-      ChannelDescriptor(
-        key: 'temp',
-        label: '体温',
-        unit: '°C',
-        sampleRate: sampleRate,
-        colorHex: '#E76F51',
-        enabled: true,
-      ),
-    ]);
     _frameController.add(SignalFrame(
       deviceId: deviceId,
       sessionId: sessionId,
@@ -1196,31 +1196,6 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       return false;
     }
 
-    const metadata = <String, (String, String)>{
-      'imu_motion': ('IMU Motion', '#457B9D'),
-      'imu_ax': ('IMU AX', '#2A9D8F'),
-      'imu_ay': ('IMU AY', '#36B7A1'),
-      'imu_az': ('IMU AZ', '#55C7AE'),
-      'imu_gx': ('IMU GX', '#7B6DFF'),
-      'imu_gy': ('IMU GY', '#9A7CFF'),
-      'imu_gz': ('IMU GZ', '#B792FF'),
-    };
-    _mergeBinaryCatalog(
-      metadata.entries
-          .where((entry) => values[entry.key]?.isNotEmpty ?? false)
-          .map(
-            (entry) => ChannelDescriptor(
-              key: entry.key,
-              label: entry.value.$1,
-              unit: 'raw',
-              sampleRate: sampleRate,
-              colorHex: entry.value.$2,
-              enabled: false,
-            ),
-          )
-          .toList(growable: false),
-    );
-
     for (final entry in values.entries) {
       if (entry.value.isEmpty) {
         continue;
@@ -1264,12 +1239,14 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
 
     final incomingChannels = config.demoMode
         ? batch.channels
-            .where((ChannelDescriptor item) => _isDemoRealtimeChannel(item.key))
+            .where((ChannelDescriptor item) => _isDemoWaveformChannel(item.key))
             .toList(growable: false)
-        : batch.channels;
+        : batch.channels
+            .where((ChannelDescriptor item) => !_isStatusTelemetryChannelKey(item.key))
+            .toList(growable: false);
     _mergeBinaryCatalog(incomingChannels);
     for (final SignalFrame frame in batch.frames) {
-      if (config.demoMode && !_isDemoRealtimeChannel(frame.channelKey)) {
+      if (config.demoMode && !_isDemoAcceptedChannel(frame.channelKey)) {
         continue;
       }
       _frameController.add(frame);
@@ -1284,14 +1261,18 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
     return true;
   }
 
-  bool _isDemoRealtimeChannel(String key) =>
+  bool _isDemoWaveformChannel(String key) =>
       key == 'ecg_filtered' ||
       key == 'ppg_ir_filtered' ||
-      key == 'ppg_red_filtered' ||
-      key.startsWith('imu_') ||
-      key == 'temp';
+      key == 'ppg_red_filtered';
+
+  bool _isDemoAcceptedChannel(String key) =>
+      _isDemoWaveformChannel(key) || _isStatusTelemetryChannelKey(key);
 
   void _mergeBinaryCatalog(List<ChannelDescriptor> incoming) {
+    incoming = incoming
+        .where((ChannelDescriptor item) => !_isStatusTelemetryChannelKey(item.key))
+        .toList(growable: false);
     if (incoming.isEmpty) {
       return;
     }
@@ -1936,8 +1917,29 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     _deviceId = deviceName.isEmpty ? config.deviceNamePrefix : deviceName;
     _sessionId = 'ble-${DateTime.now().millisecondsSinceEpoch}';
     _autoReconnectAttempts = 0;
+    await _sendDefaultStatusChannelControl();
     _emitStatus(
         AdapterState.streaming, '蓝牙已连接: $_deviceId，等待 BIO1 二进制数据...');
+  }
+
+  Future<void> _sendDefaultStatusChannelControl() async {
+    await sendControl(
+      const ControlCommand(
+        type: 'set_channels',
+        payload: <String, dynamic>{
+          'enabledKeys': <String>[
+            'ecg',
+            'ecg_filtered',
+            'ppg',
+            'ppg_ir',
+            'ppg_red',
+            'ppg_ir_filtered',
+            'ppg_red_filtered',
+            ..._statusTelemetryChannelKeys,
+          ],
+        },
+      ),
+    );
   }
 
   Future<void> _tryAutoReconnect() async {
@@ -1990,6 +1992,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
         <dynamic>['characteristicvaluechanged', _notificationCallback],
       );
       _receiveBuffer.clear();
+      await _sendDefaultStatusChannelControl();
       _emitStatus(AdapterState.streaming, '蓝牙已自动重连: $_deviceId');
     } catch (error) {
       _emitStatus(AdapterState.disconnected, '蓝牙自动重连失败，请手动重连');
@@ -2111,7 +2114,11 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       if (batch.isEmpty) {
         _emitStatus(AdapterState.error, 'BLE BIO frame parse failed');
       } else {
-        _mergeCatalog(batch.channels);
+        _mergeCatalog(
+          batch.channels
+              .where((ChannelDescriptor item) => !_isStatusTelemetryChannelKey(item.key))
+              .toList(growable: false),
+        );
         for (final frame in batch.frames) {
           _frameController.add(frame);
         }
@@ -2145,6 +2152,18 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     final frameBytes = Uint8List.fromList(_receiveBuffer.sublist(0, frameLength));
     _receiveBuffer.removeRange(0, frameLength);
     if (isBio2) {
+      if (String.fromCharCode(typeByte) == 'T') {
+        _handleBinaryTempFrame(
+          ByteData.sublistView(frameBytes),
+          header.getUint32(7, Endian.little),
+          sampleCount,
+          sampleSize,
+          payloadOffset: headerLength,
+          frameVersion: 2,
+        );
+        _emitStatus(AdapterState.streaming, 'BLE 收到温度 BIO2 帧，样本 $sampleCount');
+        return true;
+      }
       final batch = _Bio1BinaryCodec.decode(
         frameBytes,
         deviceId: _deviceId,
@@ -2154,7 +2173,11 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
       if (batch.isEmpty) {
         _emitStatus(AdapterState.error, 'BLE BIO frame parse failed');
       } else {
-        _mergeCatalog(batch.channels);
+        _mergeCatalog(
+          batch.channels
+              .where((ChannelDescriptor item) => !_isStatusTelemetryChannelKey(item.key))
+              .toList(growable: false),
+        );
         for (final frame in batch.frames) {
           _frameController.add(frame);
         }
@@ -2184,6 +2207,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
           .map(
             (dynamic item) => ChannelDescriptor.fromJson(item as Map<String, dynamic>),
           )
+          .where((ChannelDescriptor item) => !_isStatusTelemetryChannelKey(item.key))
           .toList();
       _catalogController.add(List<ChannelDescriptor>.from(_currentCatalog));
       _emitStatus(AdapterState.streaming, '蓝牙目录已同步，共 ${_currentCatalog.length} 个通道');
@@ -2372,50 +2396,6 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     }
 
     final sampleRate = _estimateSampleRate(timestampsUs, 100);
-    _mergeCatalog(<ChannelDescriptor>[
-      _buildChannelDescriptor(
-        key: 'imu_ax',
-        label: 'IMU AX',
-        unit: 'raw',
-        colorHex: '#2A9D8F',
-        sampleRate: sampleRate,
-      ),
-      _buildChannelDescriptor(
-        key: 'imu_ay',
-        label: 'IMU AY',
-        unit: 'raw',
-        colorHex: '#36B7A1',
-        sampleRate: sampleRate,
-      ),
-      _buildChannelDescriptor(
-        key: 'imu_az',
-        label: 'IMU AZ',
-        unit: 'raw',
-        colorHex: '#55C7AE',
-        sampleRate: sampleRate,
-      ),
-      _buildChannelDescriptor(
-        key: 'imu_gx',
-        label: 'IMU GX',
-        unit: 'raw',
-        colorHex: '#7B6DFF',
-        sampleRate: sampleRate,
-      ),
-      _buildChannelDescriptor(
-        key: 'imu_gy',
-        label: 'IMU GY',
-        unit: 'raw',
-        colorHex: '#9A7CFF',
-        sampleRate: sampleRate,
-      ),
-      _buildChannelDescriptor(
-        key: 'imu_gz',
-        label: 'IMU GZ',
-        unit: 'raw',
-        colorHex: '#B792FF',
-        sampleRate: sampleRate,
-      ),
-    ]);
     for (final entry in channelSamples.entries) {
       _emitSignalFrame(
         channelKey: entry.key,
@@ -2433,34 +2413,40 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     int seq,
     int sampleCount,
     int sampleSize,
-  ) {
+    {
+    int payloadOffset = 11,
+    int frameVersion = 1,
+  }) {
     final timestampsUs = <int>[];
     final values = <double>[];
     for (var index = 0; index < sampleCount; index++) {
-      final offset = 11 + index * sampleSize;
+      final offset = payloadOffset + index * sampleSize;
       if (offset + sampleSize > data.lengthInBytes) break;
       timestampsUs.add(_readUint64Le(data, offset));
       values.add(data.getFloat32(offset + 10, Endian.little).toDouble());
     }
-    if (timestampsUs.isEmpty) return;
+    if (timestampsUs.isEmpty) {
+      _emitStatus(AdapterState.error, 'BLE 温度帧为空或长度不足');
+      return;
+    }
 
     final sampleRate = _estimateSampleRate(timestampsUs, 1);
-    _mergeCatalog(<ChannelDescriptor>[
-      _buildChannelDescriptor(
-        key: 'temp',
-        label: '体温',
-        unit: '°C',
-        colorHex: '#E76F51',
-        sampleRate: sampleRate,
-      ),
-    ]);
+    final validValues = values
+        .where((double value) => value > 20 && value < 45)
+        .toList(growable: false);
+    if (validValues.isEmpty) {
+      final preview = values.isEmpty ? 'empty' : values.last.toStringAsPrecision(6);
+      _emitStatus(AdapterState.error, 'BLE 温度解析异常，末值 $preview');
+      return;
+    }
     _emitSignalFrame(
       channelKey: 'temp',
       seq: seq,
       unit: '°C',
       sampleRate: sampleRate,
       timestampsUs: timestampsUs,
-      samples: values,
+      samples: validValues,
+      frameVersion: frameVersion,
     );
   }
 
@@ -2472,6 +2458,7 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
     required List<int> timestampsUs,
     required List<double> samples,
     double quality = 1.0,
+    int frameVersion = 1,
   }) {
     final sampleTimestampsMs = timestampsUs
         .map((int timestampUs) => timestampUs ~/ 1000)
@@ -2491,13 +2478,19 @@ class BluetoothDataSourceAdapter implements DataSourceAdapter {
         transport: 'ble_binary',
         receivedAtMs: DateTime.now().millisecondsSinceEpoch,
         sourceSeq: seq,
-        frameVersion: 1,
+        frameVersion: frameVersion,
         decodeStatus: 'ok',
       ),
     );
   }
 
   void _mergeCatalog(List<ChannelDescriptor> incoming) {
+    incoming = incoming
+        .where((ChannelDescriptor item) => !_isStatusTelemetryChannelKey(item.key))
+        .toList(growable: false);
+    if (incoming.isEmpty) {
+      return;
+    }
     var changed = false;
     final nextCatalog = List<ChannelDescriptor>.from(_currentCatalog);
     for (final descriptor in incoming) {

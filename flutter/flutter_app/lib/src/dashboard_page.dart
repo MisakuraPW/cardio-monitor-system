@@ -344,10 +344,8 @@ class _DashboardPageState extends State<DashboardPage> {
             icon: Icons.thermostat,
             color: const Color(0xFFE76F51),
             title: '温度',
-            value: _controller.hasTemperatureData
-                ? '${_controller.displayTemperatureCelsius!.toStringAsFixed(1)} °C'
-                : '-- °C',
-            detail: _controller.hasTemperatureData ? '来自设备' : '等待设备数据',
+            value: '${_controller.displayTemperatureCelsius.toStringAsFixed(1)} °C',
+            detail: '来自设备',
           ),
           _InfoCard(
             icon: Icons.directions_run,
