@@ -92,8 +92,6 @@ class _DashboardPageState extends State<DashboardPage> {
                       padding: const EdgeInsets.all(12),
                       child: Column(
                         children: <Widget>[
-                          _buildMetricsBar(context),
-                          const SizedBox(height: 12),
                           AnimatedBuilder(
                             animation: _waveformListenable,
                             builder: (_, __) => _buildWaveformArea(context),
@@ -117,8 +115,6 @@ class _DashboardPageState extends State<DashboardPage> {
                           animation: _waveformListenable,
                           builder: (_, __) => Column(
                             children: <Widget>[
-                              _buildMetricsBar(context),
-                              const SizedBox(height: 12),
                               Expanded(child: _buildWaveformArea(context)),
                             ],
                           ),
@@ -202,66 +198,54 @@ class _DashboardPageState extends State<DashboardPage> {
 
   // ── Key metrics bar ─────────────────────────────────────────────
 
-  Widget _buildMetricsBar(BuildContext context) {
+  List<Widget> _buildMetricBarItems() {
     final physio = _controller.localAnalysis.physio;
     final analysis = _controller.localAnalysis;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFD0D8D3).withValues(alpha: 0.5)),
+    return <Widget>[
+      if (physio.heartRateBpm != null)
+        _VitalChip(
+          icon: Icons.favorite,
+          color: const Color(0xFFE63946),
+          label: 'HR',
+          value: physio.heartRateBpm!.toStringAsFixed(0),
+          unit: 'BPM',
+        ),
+      if (physio.spo2Percent != null)
+        _VitalChip(
+          icon: Icons.air,
+          color: const Color(0xFF2A9D8F),
+          label: 'SpO₂',
+          value: physio.spo2Percent!.toStringAsFixed(0),
+          unit: '%',
+        ),
+      _VitalChip(
+        icon: Icons.analytics_outlined,
+        color: const Color(0xFF457B9D),
+        label: '质量',
+        value: (analysis.meanQuality * 100).toStringAsFixed(0),
+        unit: '%',
       ),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        children: <Widget>[
-          if (physio.heartRateBpm != null)
-            _VitalChip(
-              icon: Icons.favorite,
-              color: const Color(0xFFE63946),
-              label: 'HR',
-              value: physio.heartRateBpm!.toStringAsFixed(0),
-              unit: 'BPM',
-            ),
-          if (physio.spo2Percent != null)
-            _VitalChip(
-              icon: Icons.air,
-              color: const Color(0xFF2A9D8F),
-              label: 'SpO₂',
-              value: physio.spo2Percent!.toStringAsFixed(0),
-              unit: '%',
-            ),
-          _VitalChip(
-            icon: Icons.analytics_outlined,
-            color: const Color(0xFF457B9D),
-            label: '质量',
-            value: (analysis.meanQuality * 100).toStringAsFixed(0),
-            unit: '%',
-          ),
-          _VitalChip(
-            icon: Icons.upload_outlined,
-            color: const Color(0xFF8D99AE),
-            label: '分段',
-            value: '${_controller.uploadedSegmentCount}',
-            unit: '段',
-          ),
-          if (_controller.isConnected)
-            _VitalChip(
-              icon: Icons.timer_outlined,
-              color: _controller.transportStats.isNotEmpty &&
-                      _controller.transportStats.first.lastPublishLatencyMs > 200
-                  ? const Color(0xFFF4A261)
-                  : const Color(0xFF2A9D8F),
-              label: '延迟',
-              value: _controller.transportStats.isNotEmpty
-                  ? '${_controller.transportStats.first.lastPublishLatencyMs}'
-                  : '-',
-              unit: 'ms',
-            ),
-        ],
+      _VitalChip(
+        icon: Icons.upload_outlined,
+        color: const Color(0xFF8D99AE),
+        label: '分段',
+        value: '${_controller.uploadedSegmentCount}',
+        unit: '段',
       ),
-    );
+      if (_controller.isConnected)
+        _VitalChip(
+          icon: Icons.timer_outlined,
+          color: _controller.transportStats.isNotEmpty &&
+                  _controller.transportStats.first.lastPublishLatencyMs > 200
+              ? const Color(0xFFF4A261)
+              : const Color(0xFF2A9D8F),
+          label: '延迟',
+          value: _controller.transportStats.isNotEmpty
+              ? '${_controller.transportStats.first.lastPublishLatencyMs}'
+              : '-',
+          unit: 'ms',
+        ),
+    ];
   }
 
   // ── Waveform area ───────────────────────────────────────────────
@@ -340,6 +324,7 @@ class _DashboardPageState extends State<DashboardPage> {
         runSpacing: 8,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: <Widget>[
+          ..._buildMetricBarItems(),
           if (_controller.isStartupBuffering)
             _InfoCard(
               icon: Icons.hourglass_top,
@@ -359,16 +344,18 @@ class _DashboardPageState extends State<DashboardPage> {
             icon: Icons.thermostat,
             color: const Color(0xFFE76F51),
             title: '温度',
-            value: '${_controller.displayTemperatureCelsius.toStringAsFixed(1)} °C',
-            detail: _controller.hasTemperatureData ? '来自设备' : '默认演示值',
+            value: _controller.hasTemperatureData
+                ? '${_controller.displayTemperatureCelsius!.toStringAsFixed(1)} °C'
+                : '-- °C',
+            detail: _controller.hasTemperatureData ? '来自设备' : '等待设备数据',
           ),
           _InfoCard(
             icon: Icons.directions_run,
             color: const Color(0xFF457B9D),
             title: 'IMU 运动',
-            value: imu.hasData ? imu.motionLevel.toStringAsFixed(0) : '--',
+            value: imu.hasData ? imu.motionLabel : '--',
             detail: imu.hasData
-                ? 'X ${imu.ax.toStringAsFixed(0)} / Y ${imu.ay.toStringAsFixed(0)} / Z ${imu.az.toStringAsFixed(0)}'
+                ? '低频状态 / 强度 ${imu.motionLevel.toStringAsFixed(0)}'
                 : '等待低频 IMU 状态',
           ),
           _InfoCard(

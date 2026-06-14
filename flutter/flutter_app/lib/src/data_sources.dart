@@ -845,6 +845,15 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       client.subscribe('$_baseTopic/waveform_bin/ppg_filtered', MqttQos.atMostOnce);
       client.subscribe('$_baseTopic/waveform_bin/imu', MqttQos.atMostOnce);
       client.subscribe('$_baseTopic/waveform_bin/temp', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/imu_ax', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/imu_ay', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/imu_az', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/imu_gx', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/imu_gy', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/imu_gz', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/imu', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/temp', MqttQos.atMostOnce);
+      client.subscribe('$_baseTopic/waveform/temperature', MqttQos.atMostOnce);
     } else {
       client.subscribe('$_baseTopic/catalog', MqttQos.atLeastOnce);
       client.subscribe('$_baseTopic/waveform/+', MqttQos.atMostOnce);
@@ -962,9 +971,17 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       }
 
       if (topic.contains('/waveform/')) {
+        final channelFromTopic = topic.split('/').last;
+        if (channelFromTopic == 'temp' || channelFromTopic == 'temperature') {
+          _handleTemperatureJson(jsonMap);
+          continue;
+        }
+        if (channelFromTopic == 'imu' && _handleImuAggregateJson(jsonMap)) {
+          continue;
+        }
         final frameJson = <String, dynamic>{...jsonMap};
         if (!frameJson.containsKey('channelKey')) {
-          frameJson['channelKey'] = topic.split('/').last;
+          frameJson['channelKey'] = channelFromTopic;
         }
         frameJson['transport'] = frameJson['transport'] ?? 'mqtt_json';
         frameJson['receivedAtMs'] = DateTime.now().millisecondsSinceEpoch;
@@ -989,33 +1006,61 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
         _emitStatus(AdapterState.error, message);
       }
 
-      if (topic.endsWith('/temperature')) {
+      if (topic.endsWith('/temperature') ||
+          topic.endsWith('/waveform_bin/temp') ||
+          topic.endsWith('/temp')) {
         _handleTemperatureJson(jsonMap);
+        continue;
+      }
+
+      if ((topic.endsWith('/imu') || topic.endsWith('/imu_status')) &&
+          _handleImuAggregateJson(jsonMap)) {
+        continue;
       }
     }
   }
 
   void _handleTemperatureJson(Map<String, dynamic> json) {
     final rawSamples = json['samples'] as List<dynamic>? ?? const <dynamic>[];
-    if (rawSamples.isEmpty) return;
+    final rootTemp = _jsonDouble(json, const <String>['tempC', 'temp_c', 'temperature', 'value']);
+    if (rawSamples.isEmpty && rootTemp == null) return;
     final sampleRate = (json['sampleRate'] as num?)?.toDouble() ?? 1.0;
     final baseTimestampMs = (json['timestampMs'] as num?)?.toInt() ??
         DateTime.now().millisecondsSinceEpoch;
     final seq = (json['seq'] as num?)?.toInt() ?? 0;
     final deviceId = (json['deviceId'] ?? _binarySessionId).toString();
-    final sessionId = _binarySessionId;
+    final sessionId = (json['sessionId'] ?? _binarySessionId).toString();
 
     final tempValues = <double>[];
     final timestamps = <int>[];
+    final rawTimestampsUs = json['timestampsUs'] as List<dynamic>?;
+    final rawTimestampsMs = (json['sampleTimestampsMs'] as List<dynamic>?) ??
+        (json['timestampsMs'] as List<dynamic>?);
     for (final dynamic item in rawSamples) {
       if (item is Map<String, dynamic>) {
-        final tempC = (item['tempC'] as num?)?.toDouble();
+        final tempC = _jsonDouble(item, const <String>['tempC', 'temp_c', 'temperature', 'value']);
         final tsUs = (item['tsUs'] as num?)?.toInt();
+        final tsMs = (item['timestampMs'] as num?)?.toInt();
         if (tempC != null) {
           tempValues.add(tempC);
-          timestamps.add(tsUs != null ? tsUs ~/ 1000 : baseTimestampMs);
+          timestamps.add(tsUs != null ? tsUs ~/ 1000 : tsMs ?? baseTimestampMs);
         }
+      } else if (item is num) {
+        final index = tempValues.length;
+        tempValues.add(item.toDouble());
+        final tsUs = rawTimestampsUs != null && index < rawTimestampsUs.length
+            ? (rawTimestampsUs[index] as num?)?.toInt()
+            : null;
+        final tsMs = rawTimestampsMs != null && index < rawTimestampsMs.length
+            ? (rawTimestampsMs[index] as num?)?.toInt()
+            : null;
+        final stepMs = sampleRate <= 0 ? 1000 : (1000 / sampleRate).round();
+        timestamps.add(tsUs != null ? tsUs ~/ 1000 : tsMs ?? baseTimestampMs + stepMs * index);
       }
+    }
+    if (tempValues.isEmpty && rootTemp != null) {
+      tempValues.add(rootTemp);
+      timestamps.add(baseTimestampMs);
     }
     if (tempValues.isEmpty) return;
 
@@ -1044,6 +1089,161 @@ class MqttDataSourceAdapter implements DataSourceAdapter {
       receivedAtMs: DateTime.now().millisecondsSinceEpoch,
       sourceSeq: seq,
     ));
+  }
+
+  double? _jsonDouble(Map<String, dynamic> json, List<String> keys) {
+    for (final String key in keys) {
+      final value = json[key];
+      if (value is num) {
+        return value.toDouble();
+      }
+      if (value is String) {
+        final parsed = double.tryParse(value);
+        if (parsed != null) {
+          return parsed;
+        }
+      }
+    }
+    return null;
+  }
+
+  bool _handleImuAggregateJson(Map<String, dynamic> json) {
+    final sampleRate = (json['sampleRate'] as num?)?.toDouble() ?? 10.0;
+    final baseTimestampMs = (json['timestampMs'] as num?)?.toInt() ??
+        DateTime.now().millisecondsSinceEpoch;
+    final seq = (json['seq'] as num?)?.toInt() ?? 0;
+    final deviceId = (json['deviceId'] ?? config.deviceId).toString();
+    final sessionId = (json['sessionId'] ?? _binarySessionId).toString();
+    final rawSamples = json['samples'] as List<dynamic>? ?? const <dynamic>[];
+    final rawTimestampsUs = json['timestampsUs'] as List<dynamic>?;
+    final rawTimestampsMs = (json['sampleTimestampsMs'] as List<dynamic>?) ??
+        (json['timestampsMs'] as List<dynamic>?);
+    final values = <String, List<double>>{
+      'imu_motion': <double>[],
+      'imu_ax': <double>[],
+      'imu_ay': <double>[],
+      'imu_az': <double>[],
+      'imu_gx': <double>[],
+      'imu_gy': <double>[],
+      'imu_gz': <double>[],
+    };
+    final timestamps = <int>[];
+
+    for (final dynamic item in rawSamples) {
+      if (item is! Map<String, dynamic>) {
+        continue;
+      }
+      final ax = _jsonDouble(item, const <String>['imu_ax', 'ax', 'acc_x', 'accX']);
+      final ay = _jsonDouble(item, const <String>['imu_ay', 'ay', 'acc_y', 'accY']);
+      final az = _jsonDouble(item, const <String>['imu_az', 'az', 'acc_z', 'accZ']);
+      final gx = _jsonDouble(item, const <String>['imu_gx', 'gx', 'gyr_x', 'gyro_x', 'gyroX']);
+      final gy = _jsonDouble(item, const <String>['imu_gy', 'gy', 'gyr_y', 'gyro_y', 'gyroY']);
+      final gz = _jsonDouble(item, const <String>['imu_gz', 'gz', 'gyr_z', 'gyro_z', 'gyroZ']);
+      final motion = _jsonDouble(item, const <String>['imu_motion', 'motionLevel', 'motion', 'activity']);
+      if (ax == null && ay == null && az == null && gx == null && gy == null && gz == null && motion == null) {
+        continue;
+      }
+      final index = timestamps.length;
+      final tsUs = (item['tsUs'] as num?)?.toInt() ??
+          (rawTimestampsUs != null && index < rawTimestampsUs.length
+              ? (rawTimestampsUs[index] as num?)?.toInt()
+              : null);
+      final tsMs = (item['timestampMs'] as num?)?.toInt() ??
+          (rawTimestampsMs != null && index < rawTimestampsMs.length
+              ? (rawTimestampsMs[index] as num?)?.toInt()
+              : null);
+      final stepMs = sampleRate <= 0 ? 100 : (1000 / sampleRate).round();
+      timestamps.add(tsUs != null ? tsUs ~/ 1000 : tsMs ?? baseTimestampMs + stepMs * index);
+      if (motion != null) {
+        values['imu_motion']!.add(motion);
+      }
+      if (ax != null || ay != null || az != null || gx != null || gy != null || gz != null) {
+        values['imu_ax']!.add(ax ?? 0);
+        values['imu_ay']!.add(ay ?? 0);
+        values['imu_az']!.add(az ?? 0);
+        values['imu_gx']!.add(gx ?? 0);
+        values['imu_gy']!.add(gy ?? 0);
+        values['imu_gz']!.add(gz ?? 0);
+      }
+    }
+
+    final rootMotion = _jsonDouble(json, const <String>['imu_motion', 'motionLevel', 'motion', 'activity']);
+    final rootAx = _jsonDouble(json, const <String>['imu_ax', 'ax', 'acc_x', 'accX']);
+    final rootAy = _jsonDouble(json, const <String>['imu_ay', 'ay', 'acc_y', 'accY']);
+    final rootAz = _jsonDouble(json, const <String>['imu_az', 'az', 'acc_z', 'accZ']);
+    final rootGx = _jsonDouble(json, const <String>['imu_gx', 'gx', 'gyr_x', 'gyro_x', 'gyroX']);
+    final rootGy = _jsonDouble(json, const <String>['imu_gy', 'gy', 'gyr_y', 'gyro_y', 'gyroY']);
+    final rootGz = _jsonDouble(json, const <String>['imu_gz', 'gz', 'gyr_z', 'gyro_z', 'gyroZ']);
+    if (timestamps.isEmpty &&
+        (rootMotion != null || rootAx != null || rootAy != null || rootAz != null ||
+            rootGx != null || rootGy != null || rootGz != null)) {
+      timestamps.add(baseTimestampMs);
+      if (rootMotion != null) {
+        values['imu_motion']!.add(rootMotion);
+      }
+      if (rootAx != null || rootAy != null || rootAz != null ||
+          rootGx != null || rootGy != null || rootGz != null) {
+        values['imu_ax']!.add(rootAx ?? 0);
+        values['imu_ay']!.add(rootAy ?? 0);
+        values['imu_az']!.add(rootAz ?? 0);
+        values['imu_gx']!.add(rootGx ?? 0);
+        values['imu_gy']!.add(rootGy ?? 0);
+        values['imu_gz']!.add(rootGz ?? 0);
+      }
+    }
+
+    if (timestamps.isEmpty) {
+      return false;
+    }
+
+    const metadata = <String, (String, String)>{
+      'imu_motion': ('IMU Motion', '#457B9D'),
+      'imu_ax': ('IMU AX', '#2A9D8F'),
+      'imu_ay': ('IMU AY', '#36B7A1'),
+      'imu_az': ('IMU AZ', '#55C7AE'),
+      'imu_gx': ('IMU GX', '#7B6DFF'),
+      'imu_gy': ('IMU GY', '#9A7CFF'),
+      'imu_gz': ('IMU GZ', '#B792FF'),
+    };
+    _mergeBinaryCatalog(
+      metadata.entries
+          .where((entry) => values[entry.key]?.isNotEmpty ?? false)
+          .map(
+            (entry) => ChannelDescriptor(
+              key: entry.key,
+              label: entry.value.$1,
+              unit: 'raw',
+              sampleRate: sampleRate,
+              colorHex: entry.value.$2,
+              enabled: false,
+            ),
+          )
+          .toList(growable: false),
+    );
+
+    for (final entry in values.entries) {
+      if (entry.value.isEmpty) {
+        continue;
+      }
+      _frameController.add(
+        SignalFrame(
+          deviceId: deviceId,
+          sessionId: sessionId,
+          seq: seq,
+          timestampMs: timestamps.first,
+          channelKey: entry.key,
+          sampleRate: sampleRate,
+          unit: 'raw',
+          quality: 1.0,
+          samples: entry.value,
+          sampleTimestampsMs: timestamps,
+          transport: 'mqtt_json',
+          receivedAtMs: DateTime.now().millisecondsSinceEpoch,
+          sourceSeq: seq,
+        ),
+      );
+    }
+    return true;
   }
 
   bool _tryHandleBinaryPayload(String topic, Uint8List payloadBytes) {

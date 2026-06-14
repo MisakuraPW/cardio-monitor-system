@@ -70,6 +70,7 @@ class MonitorController extends ChangeNotifier {
   String _lastCatalogSignature = '';
   final Map<String, int> _lastDisplayTimestampMsByChannel = <String, int>{};
   final Map<String, int> _lastAcceptedSeqByChannel = <String, int>{};
+  final Map<String, int> _lastStatusTelemetryAcceptedAtMs = <String, int>{};
   final Set<String> _initiallyFilledChannels = <String>{};
   final Map<String, double> _latestImuValues = <String, double>{};
   int _latestImuReceivedAtMs = 0;
@@ -134,8 +135,8 @@ class MonitorController extends ChangeNotifier {
   int get _liveRetentionMs =>
       (math.max(120.0, _requiredLiveBufferSeconds + secondsPerScreen + 30.0) * 1000).round();
   bool get isEcgWorn => _latestEcgLeadOn ?? true;
-  double get displayTemperatureCelsius =>
-      _latestTemperatureCelsius ?? localAnalysis.physio.temperatureCelsius ?? 36.7;
+  double? get displayTemperatureCelsius =>
+      _latestTemperatureCelsius ?? localAnalysis.physio.temperatureCelsius;
   bool get hasTemperatureData =>
       _latestTemperatureCelsius != null || localAnalysis.physio.temperatureCelsius != null;
   ImuDisplaySnapshot get imuDisplay => ImuDisplaySnapshot.fromValues(
@@ -265,6 +266,7 @@ class MonitorController extends ChangeNotifier {
     _runtimeStats.clear();
     _lastDisplayTimestampMsByChannel.clear();
     _lastAcceptedSeqByChannel.clear();
+    _lastStatusTelemetryAcceptedAtMs.clear();
     _initiallyFilledChannels.clear();
     _latestImuValues.clear();
     _latestImuReceivedAtMs = 0;
@@ -548,10 +550,20 @@ class MonitorController extends ChangeNotifier {
     frame = normalizedFrame;
 
     if (_isImuChannel(frame.channelKey)) {
+      if (!_acceptStatusTelemetryFrame(frame)) {
+        return;
+      }
       _observeImuFrame(frame);
+      _scheduleNotify();
+      return;
     }
     if (frame.channelKey == 'temp') {
+      if (!_acceptStatusTelemetryFrame(frame)) {
+        return;
+      }
       _observeTemperatureFrame(frame);
+      _scheduleNotify();
+      return;
     }
     if (_isEcgChannel(frame.channelKey)) {
       final leadOn = frame.transport.startsWith('ble_') || frame.quality > 0.15;
@@ -1051,6 +1063,17 @@ class MonitorController extends ChangeNotifier {
     _latestImuReceivedAtMs = frame.receivedAtMs > 0
         ? frame.receivedAtMs
         : DateTime.now().millisecondsSinceEpoch;
+  }
+
+  bool _acceptStatusTelemetryFrame(SignalFrame frame) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final previous = _lastStatusTelemetryAcceptedAtMs[frame.channelKey] ?? 0;
+    final intervalMs = frame.channelKey == 'temp' ? 800 : 250;
+    if (previous > 0 && now - previous < intervalMs) {
+      return false;
+    }
+    _lastStatusTelemetryAcceptedAtMs[frame.channelKey] = now;
+    return true;
   }
 
   void _observeTemperatureFrame(SignalFrame frame) {
@@ -1643,7 +1666,10 @@ class ImuDisplaySnapshot {
     required this.gx,
     required this.gy,
     required this.gz,
+    required this.accMagnitude,
+    required this.gyroMagnitude,
     required this.motionLevel,
+    required this.motionLabel,
     required this.receivedAtMs,
   });
 
@@ -1657,6 +1683,11 @@ class ImuDisplaySnapshot {
     final gx = values['imu_gx'] ?? 0;
     final gy = values['imu_gy'] ?? 0;
     final gz = values['imu_gz'] ?? 0;
+    final accMagnitude = math.sqrt(ax * ax + ay * ay + az * az);
+    final gyroMagnitude = math.sqrt(gx * gx + gy * gy + gz * gz);
+    final accDeltaFromGravity = (accMagnitude - 16384.0).abs();
+    final motionLevel =
+        values['imu_motion'] ?? math.max(gyroMagnitude, accDeltaFromGravity);
     return ImuDisplaySnapshot(
       ax: ax,
       ay: ay,
@@ -1664,9 +1695,25 @@ class ImuDisplaySnapshot {
       gx: gx,
       gy: gy,
       gz: gz,
-      motionLevel: math.sqrt(ax * ax + ay * ay + az * az),
+      accMagnitude: accMagnitude,
+      gyroMagnitude: gyroMagnitude,
+      motionLevel: motionLevel,
+      motionLabel: _motionLabel(motionLevel),
       receivedAtMs: receivedAtMs,
     );
+  }
+
+  static String _motionLabel(double level) {
+    if (level >= 6000) {
+      return '剧烈运动';
+    }
+    if (level >= 2500) {
+      return '明显运动';
+    }
+    if (level >= 800) {
+      return '轻微运动';
+    }
+    return '平稳';
   }
 
   final double ax;
@@ -1675,7 +1722,10 @@ class ImuDisplaySnapshot {
   final double gx;
   final double gy;
   final double gz;
+  final double accMagnitude;
+  final double gyroMagnitude;
   final double motionLevel;
+  final String motionLabel;
   final int receivedAtMs;
 
   bool get hasData => receivedAtMs > 0;
