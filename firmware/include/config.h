@@ -27,6 +27,7 @@ constexpr gpio_num_t BMI_INT2_PIN = GPIO_NUM_17;
 constexpr uint32_t BMI_SAMPLE_RATE_HZ = 200;
 constexpr uint32_t BMI_SAMPLE_PERIOD_US = 1000000UL / BMI_SAMPLE_RATE_HZ;
 constexpr uint32_t BMI_SPI_CLOCK_HZ = 1000000;
+constexpr uint32_t IMU_OUTPUT_DECIMATE = 100;  // 200 Hz / 100 = 2 Hz status output.
 
 // M601 - 1-Wire digital temperature sensor
 constexpr gpio_num_t M601_DQ_PIN = GPIO_NUM_14;

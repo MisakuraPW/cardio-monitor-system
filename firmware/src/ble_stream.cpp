@@ -763,7 +763,7 @@ bool enqueueImu(const ImuSample& sample) {
     return true;
   }
   ++g_imuDecimateCounter;
-  if ((g_imuDecimateCounter % 20U) != 0U) {
+  if ((g_imuDecimateCounter % IMU_OUTPUT_DECIMATE) != 0U) {
     return true;
   }
   if (g_imuBleQueue == nullptr) {

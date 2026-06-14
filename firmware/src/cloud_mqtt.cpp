@@ -1300,7 +1300,7 @@ bool enqueueImu(const ImuSample& sample) {
   }
   if (kDemoWifiMode) {
     ++g_demoImuDecimateCounter;
-    if ((g_demoImuDecimateCounter % 20U) != 0U) {
+    if ((g_demoImuDecimateCounter % IMU_OUTPUT_DECIMATE) != 0U) {
       return true;
     }
   }
